@@ -75,7 +75,7 @@ export class MainScene extends Phaser.Scene {
 
     // Agent wandering timer
     this.time.addEvent({
-      delay: 3000,
+      delay: 6000,
       callback: this.wanderAgents,
       callbackScope: this,
       loop: true,
@@ -102,10 +102,11 @@ export class MainScene extends Phaser.Scene {
         const isAlt = (x + y) % 2 === 0;
 
         // Rug in center area
-        const isRug = x >= 4 && x <= 7 && y >= 4 && y <= 7;
+        const isRug = x >= 5 && x <= 10 && y >= 5 && y <= 10;
+        const isRugBorder = isRug && (x === 5 || x === 10 || y === 5 || y === 10);
 
         let texture = isAlt ? 'tile_floor_alt' : 'tile_floor';
-        if (isRug) texture = 'tile_rug';
+        if (isRug) texture = isRugBorder ? 'tile_rug_border' : 'tile_rug';
 
         const tile = this.add.sprite(screenX, screenY, texture);
         tile.setOrigin(0.5, 0.5);
@@ -117,7 +118,7 @@ export class MainScene extends Phaser.Scene {
     const lightGlow = this.add.graphics();
     const centerScreen = gridToScreen(GRID_WIDTH / 2, GRID_HEIGHT / 2);
     lightGlow.fillStyle(0xffeaa7, 0.05);
-    lightGlow.fillCircle(centerScreen.x, centerScreen.y, 200);
+    lightGlow.fillCircle(centerScreen.x, centerScreen.y, 300);
     lightGlow.setDepth(GRID_WIDTH * GRID_HEIGHT + 1);
   }
 
@@ -126,10 +127,10 @@ export class MainScene extends Phaser.Scene {
 
     // Place some desks around the edges
     const deskPositions = [
-      { x: 2, y: 2 },
-      { x: 9, y: 2 },
-      { x: 2, y: 9 },
-      { x: 9, y: 9 },
+      { x: 3, y: 3 },
+      { x: 12, y: 3 },
+      { x: 3, y: 12 },
+      { x: 12, y: 12 },
     ];
 
     deskPositions.forEach((pos) => {
@@ -147,9 +148,9 @@ export class MainScene extends Phaser.Scene {
     // Plants in corners
     const plantPositions = [
       { x: 1, y: 1 },
-      { x: 10, y: 1 },
-      { x: 1, y: 10 },
-      { x: 10, y: 10 },
+      { x: 14, y: 1 },
+      { x: 1, y: 14 },
+      { x: 14, y: 14 },
     ];
 
     plantPositions.forEach((pos) => {
@@ -161,8 +162,8 @@ export class MainScene extends Phaser.Scene {
 
     // Lamps
     const lampPositions = [
-      { x: 5, y: 1 },
-      { x: 6, y: 10 },
+      { x: 7, y: 1 },
+      { x: 8, y: 14 },
     ];
 
     lampPositions.forEach((pos) => {
@@ -173,9 +174,9 @@ export class MainScene extends Phaser.Scene {
     });
 
     // Bookshelf
-    const shelfPos = gridToScreen(0, 5);
-    const shelf = this.add.sprite(shelfPos.x - 20, shelfPos.y - 30, 'deco_bookshelf');
-    shelf.setDepth(5 * GRID_WIDTH + 50);
+    const shelfPos = gridToScreen(1, 7);
+    const shelf = this.add.sprite(shelfPos.x, shelfPos.y - 20, 'deco_bookshelf');
+    shelf.setDepth(7 * GRID_WIDTH + 1 + 50);
     this.furniture!.add(shelf);
   }
 
@@ -301,12 +302,35 @@ export class MainScene extends Phaser.Scene {
         }
       }
     });
+
+    // Session events - update agent visuals based on session activity
+    eventBus.on('session_message', (event) => {
+      const { agentId, message } = event.data;
+      if (!agentId || !message) return;
+
+      if (message.type === 'thinking') {
+        this.updateAgentTexture(agentId, 'thinking');
+      } else if (message.type === 'tool_use') {
+        this.updateAgentTexture(agentId, 'working');
+      } else if (message.type === 'assistant') {
+        this.updateAgentTexture(agentId, 'working');
+      }
+    });
+
+    eventBus.on('session_ended', (event) => {
+      const { agentId } = event.data;
+      if (agentId) {
+        this.updateAgentTexture(agentId, 'idle');
+      }
+    });
   }
 
   private setupInput(): void {
-    this.input.on('pointerdown', () => {
-      // Clicking empty space deselects
-      this.deselectAgent();
+    this.input.on('pointerdown', (_pointer: Phaser.Input.Pointer, gameObjects: Phaser.GameObjects.GameObject[]) => {
+      // Only deselect when clicking empty space (no interactive objects hit)
+      if (gameObjects.length === 0) {
+        this.deselectAgent();
+      }
     });
 
     this.input.keyboard?.on('keydown-ESC', () => {
@@ -355,8 +379,8 @@ export class MainScene extends Phaser.Scene {
         return;
       }
 
-      // Random chance to move (50%)
-      if (Math.random() > 0.5) return;
+      // Random chance to move (15%)
+      if (Math.random() > 0.15) return;
 
       const newPos = getNearbyPosition(container.gridX, container.gridY, 2);
       this.moveAgentTo(agentId, newPos.x, newPos.y);
@@ -381,9 +405,8 @@ export class MainScene extends Phaser.Scene {
       duration,
       ease: 'Sine.easeInOut',
       onUpdate: () => {
-        // Update depth during movement
-        const currentDepth = container.y * 0.1 + 100;
-        container.setDepth(currentDepth);
+        // Update depth during movement - keep above all floor/furniture tiles
+        container.setDepth(container.y + GRID_WIDTH * GRID_HEIGHT);
       },
       onComplete: () => {
         container.gridX = newX;

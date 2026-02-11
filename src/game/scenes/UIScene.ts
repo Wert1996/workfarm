@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { Agent, Task } from '../../types';
+import { Agent, Task, AgentSession, SessionMessage } from '../../types';
 import { AgentManager, TaskManager, ClaudeCodeBridge, eventBus } from '../../control';
 
 export class UIScene extends Phaser.Scene {
@@ -164,9 +164,13 @@ export class UIScene extends Phaser.Scene {
           display: none;
           max-height: calc(100vh - 280px);
           overflow-y: auto;
+          transition: width 0.2s ease;
         }
         #agent-panel.visible {
           display: block;
+        }
+        #agent-panel.has-session {
+          width: 420px;
         }
         #agent-panel h2 {
           margin: 0 0 16px 0;
@@ -276,6 +280,94 @@ export class UIScene extends Phaser.Scene {
         }
         .btn-success:hover {
           background: linear-gradient(180deg, #00cba4 0%, #00b894 100%);
+        }
+
+        /* Session Transcript */
+        .session-transcript {
+          background: #2d3436;
+          border-radius: 6px;
+          padding: 12px;
+          max-height: 280px;
+          overflow-y: auto;
+          font-size: 12px;
+          font-family: monospace;
+          scroll-behavior: smooth;
+        }
+        .session-msg {
+          margin-bottom: 8px;
+          padding: 6px 8px;
+          border-radius: 4px;
+          word-wrap: break-word;
+          overflow-wrap: break-word;
+        }
+        .session-msg.thinking {
+          border-left: 3px solid #a29bfe;
+          color: #a29bfe;
+          font-style: italic;
+          background: rgba(162, 155, 254, 0.05);
+        }
+        .session-msg.tool_use {
+          border-left: 3px solid #00b894;
+          color: #00cec9;
+          background: rgba(0, 184, 148, 0.05);
+        }
+        .session-msg.tool_result {
+          color: #636e72;
+          background: rgba(0, 184, 148, 0.03);
+          max-height: 60px;
+          overflow: hidden;
+          font-size: 11px;
+        }
+        .session-msg.assistant {
+          color: #dfe6e9;
+        }
+        .session-msg.user {
+          border-left: 3px solid #fdcb6e;
+          color: #ffeaa7;
+          background: rgba(253, 203, 110, 0.05);
+        }
+        .session-msg.system {
+          color: #636e72;
+          text-align: center;
+          font-size: 11px;
+        }
+        .session-status {
+          display: inline-block;
+          padding: 3px 8px;
+          border-radius: 4px;
+          font-size: 10px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          margin-bottom: 8px;
+        }
+        .session-status.active { background: #00b894; color: white; }
+        .session-status.starting { background: #fdcb6e; color: #2d3436; }
+        .session-status.completed { background: #636e72; color: white; }
+        .session-status.error { background: #d63031; color: white; }
+        .session-status.waiting_input { background: #6c5ce7; color: white; }
+
+        .session-input-bar {
+          display: flex;
+          gap: 8px;
+          margin-top: 8px;
+        }
+        .session-input-bar input {
+          flex: 1;
+          background: #3d4449;
+          border: 1px solid #636e72;
+          color: #dfe6e9;
+          padding: 8px 12px;
+          border-radius: 6px;
+          font-family: 'Georgia', serif;
+          font-size: 13px;
+        }
+        .session-input-bar input:focus {
+          outline: none;
+          border-color: #6c5ce7;
+        }
+        .session-input-bar button {
+          padding: 8px 16px;
+          font-size: 13px;
         }
 
         /* Task Detail Panel */
@@ -399,12 +491,29 @@ export class UIScene extends Phaser.Scene {
     eventBus.on('task_failed', () => this.updateTaskList());
     eventBus.on('agent_hired', () => this.updateTaskList());
     eventBus.on('agent_fired', () => this.updateTaskList());
+
+    // Session events
+    eventBus.on('session_message', (event) => {
+      const { sessionId, message } = event.data;
+      this.appendSessionMessage(sessionId, message);
+    });
+
+    eventBus.on('session_status_changed', (event) => {
+      const { sessionId, status } = event.data;
+      this.updateSessionStatus(sessionId, status);
+    });
+
+    eventBus.on('session_ended', () => {
+      // Refresh the agent panel if one is shown
+      if (this.selectedAgentId) {
+        this.showAgentPanel(this.selectedAgentId);
+      }
+    });
   }
 
   private async selectDirectory(): Promise<void> {
     const dir = await this.claudeBridge.selectWorkingDirectory();
     if (dir) {
-      // Show brief notification
       this.showNotification(`Project: ${dir.split('/').pop()}`);
     }
   }
@@ -427,6 +536,55 @@ export class UIScene extends Phaser.Scene {
     nameEl.textContent = agent.name;
 
     const currentTask = agent.currentTaskId ? this.taskManager.getTask(agent.currentTaskId) : null;
+    const sessionManager = this.claudeBridge.getSessionManager();
+    const activeSession = sessionManager.getActiveSessionForAgent(agentId);
+
+    // Widen panel when session is active
+    if (activeSession) {
+      panel.classList.add('has-session');
+    } else {
+      panel.classList.remove('has-session');
+    }
+
+    let sessionHtml = '';
+    if (activeSession) {
+      const messagesHtml = activeSession.messages
+        .slice(-50) // Show last 50 messages
+        .map(msg => this.renderSessionMessage(msg))
+        .join('');
+
+      sessionHtml = `
+        <div class="panel-section">
+          <label>Session <span class="session-status ${activeSession.status}">${activeSession.status}</span></label>
+          <div class="session-transcript" id="session-transcript-${activeSession.id}">
+            ${messagesHtml || '<div class="empty-state">Waiting for activity...</div>'}
+          </div>
+          <div class="session-input-bar">
+            <input type="text" id="session-input-${activeSession.id}" placeholder="Send a message to ${agent.name}..." />
+            <button class="btn btn-success" id="session-send-${activeSession.id}">Send</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Check for completed session to show result
+    const allSessions = sessionManager.getAllSessions().filter(
+      s => s.agentId === agentId && s.status === 'completed'
+    );
+    const lastCompletedSession = allSessions.length > 0 ? allSessions[allSessions.length - 1] : null;
+
+    let completedSessionHtml = '';
+    if (!activeSession && lastCompletedSession && lastCompletedSession.messages.length > 0) {
+      const recentMsgs = lastCompletedSession.messages.slice(-20).map(msg => this.renderSessionMessage(msg)).join('');
+      completedSessionHtml = `
+        <div class="panel-section">
+          <label>Last Session <span class="session-status completed">completed</span></label>
+          <div class="session-transcript" style="max-height: 150px;">
+            ${recentMsgs}
+          </div>
+        </div>
+      `;
+    }
 
     contentEl.innerHTML = `
       <div class="panel-section">
@@ -457,6 +615,9 @@ export class UIScene extends Phaser.Scene {
           : `<div class="empty-state">No task assigned</div>`
         }
       </div>
+
+      ${sessionHtml}
+      ${completedSessionHtml}
 
       <div class="panel-section">
         <label>Assign New Task</label>
@@ -492,12 +653,39 @@ export class UIScene extends Phaser.Scene {
       this.claudeBridge.executeTask(agentId, task.id);
 
       input.value = '';
-      this.showAgentPanel(agentId); // Refresh
+      // Brief delay to let session start before refreshing
+      setTimeout(() => this.showAgentPanel(agentId), 100);
       this.updateTaskList();
     });
 
+    // Session input handler
+    if (activeSession) {
+      const sendMessage = () => {
+        const input = document.getElementById(`session-input-${activeSession.id}`) as HTMLInputElement;
+        const msg = input?.value.trim();
+        if (!msg) return;
+        this.claudeBridge.sendMessageToAgent(agentId, msg);
+        input.value = '';
+      };
+
+      document.getElementById(`session-send-${activeSession.id}`)?.addEventListener('click', sendMessage);
+      document.getElementById(`session-input-${activeSession.id}`)?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendMessage();
+      });
+
+      // Auto-scroll to bottom of transcript
+      const transcript = document.getElementById(`session-transcript-${activeSession.id}`);
+      if (transcript) {
+        transcript.scrollTop = transcript.scrollHeight;
+      }
+    }
+
     document.getElementById('btn-fire-agent')?.addEventListener('click', () => {
       if (confirm(`Are you sure you want to fire ${agent.name}?`)) {
+        // Stop active session if any
+        if (activeSession) {
+          this.claudeBridge.cancelExecution(agentId);
+        }
         this.agentManager.fireAgent(agentId);
         this.hideAgentPanel();
       }
@@ -506,8 +694,61 @@ export class UIScene extends Phaser.Scene {
     panel.classList.add('visible');
   }
 
+  private renderSessionMessage(msg: SessionMessage): string {
+    const content = this.escapeHtml(msg.content);
+    const truncated = content.length > 300 ? content.substring(0, 300) + '...' : content;
+
+    if (msg.type === 'tool_use') {
+      const toolName = msg.metadata?.toolName || 'tool';
+      return `<div class="session-msg tool_use">[${this.escapeHtml(toolName)}]</div>`;
+    }
+
+    if (msg.type === 'tool_result') {
+      const shortContent = content.length > 100 ? content.substring(0, 100) + '...' : content;
+      return `<div class="session-msg tool_result">${shortContent}</div>`;
+    }
+
+    return `<div class="session-msg ${msg.type}">${truncated}</div>`;
+  }
+
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  private appendSessionMessage(sessionId: string, message: SessionMessage): void {
+    const transcript = document.getElementById(`session-transcript-${sessionId}`);
+    if (!transcript) return;
+
+    // Remove empty state if present
+    const emptyState = transcript.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    const html = this.renderSessionMessage(message);
+    transcript.insertAdjacentHTML('beforeend', html);
+
+    // Auto-scroll
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  private updateSessionStatus(sessionId: string, status: string): void {
+    // Find and update any status badges in the DOM
+    const statusEls = document.querySelectorAll('.session-status');
+    statusEls.forEach(el => {
+      // Update if this is the right session's status badge
+      const parentSection = el.closest('.panel-section');
+      if (parentSection?.querySelector(`#session-transcript-${sessionId}`)) {
+        el.className = `session-status ${status}`;
+        el.textContent = status;
+      }
+    });
+  }
+
   private hideAgentPanel(): void {
-    document.getElementById('agent-panel')?.classList.remove('visible');
+    const panel = document.getElementById('agent-panel');
+    panel?.classList.remove('visible');
+    panel?.classList.remove('has-session');
   }
 
   private showTaskPanel(taskId: string): void {
@@ -601,7 +842,7 @@ export class UIScene extends Phaser.Scene {
         <div class="task-card ${task.status}" data-task-id="${task.id}">
           <div class="task-desc">${task.description.substring(0, 60)}${task.description.length > 60 ? '...' : ''}</div>
           <div class="task-meta">
-            ${agent ? `👤 ${agent.name}` : 'Unassigned'}
+            ${agent ? agent.name : 'Unassigned'}
             · ${task.status.replace('_', ' ')}
           </div>
         </div>

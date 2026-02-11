@@ -5,8 +5,8 @@ export const TILE_WIDTH = 64;
 export const TILE_HEIGHT = 32;
 
 // Grid dimensions - single workspace
-export const GRID_WIDTH = 12;
-export const GRID_HEIGHT = 12;
+export const GRID_WIDTH = 16;
+export const GRID_HEIGHT = 16;
 
 // Warm, inviting color palette
 export const COLORS = {
@@ -27,8 +27,9 @@ export const COLORS = {
   chair: 0x4a4a4a,
 
   // Decorative
-  rug: 0xbc8f8f,           // Rosy brown
-  rugPattern: 0x9a7b7b,
+  rug: 0x8b2232,           // Deep crimson
+  rugPattern: 0xc8a84e,    // Gold accent
+  rugBorder: 0x6b1a28,     // Dark crimson border
 
   // Agents - vibrant colors
   agentColors: [
@@ -69,7 +70,7 @@ export const GAME_CONFIG: Phaser.Types.Core.GameConfig = {
 // Convert grid coordinates to screen coordinates (isometric)
 export function gridToScreen(gridX: number, gridY: number): { x: number; y: number } {
   const offsetX = 640;
-  const offsetY = 200;
+  const offsetY = 150;
 
   const screenX = offsetX + (gridX - gridY) * (TILE_WIDTH / 2);
   const screenY = offsetY + (gridX + gridY) * (TILE_HEIGHT / 2);
@@ -80,7 +81,7 @@ export function gridToScreen(gridX: number, gridY: number): { x: number; y: numb
 // Convert screen coordinates to grid coordinates
 export function screenToGrid(screenX: number, screenY: number): { x: number; y: number } {
   const offsetX = 640;
-  const offsetY = 200;
+  const offsetY = 150;
 
   const relX = screenX - offsetX;
   const relY = screenY - offsetY;

@@ -107,8 +107,9 @@ export class BootScene extends Phaser.Scene {
     g2.generateTexture('tile_floor_alt', TILE_WIDTH, TILE_HEIGHT);
     g2.destroy();
 
-    // Rug tile
+    // Rug center tile - rich woven look
     const gRug = this.make.graphics({ x: 0, y: 0 });
+    // Base fill
     gRug.fillStyle(COLORS.rug, 1);
     gRug.beginPath();
     gRug.moveTo(TILE_WIDTH / 2, 0);
@@ -118,12 +119,65 @@ export class BootScene extends Phaser.Scene {
     gRug.closePath();
     gRug.fillPath();
 
-    // Rug pattern
+    // Woven cross-hatch pattern
+    gRug.lineStyle(1, COLORS.rugPattern, 0.35);
+    for (let i = -3; i <= 3; i++) {
+      gRug.beginPath();
+      gRug.moveTo(TILE_WIDTH / 2 + i * 8 - 12, TILE_HEIGHT / 2 - 8);
+      gRug.lineTo(TILE_WIDTH / 2 + i * 8 + 12, TILE_HEIGHT / 2 + 8);
+      gRug.strokePath();
+      gRug.beginPath();
+      gRug.moveTo(TILE_WIDTH / 2 + i * 8 - 12, TILE_HEIGHT / 2 + 8);
+      gRug.lineTo(TILE_WIDTH / 2 + i * 8 + 12, TILE_HEIGHT / 2 - 8);
+      gRug.strokePath();
+    }
+
+    // Small diamond motif in center
     gRug.fillStyle(COLORS.rugPattern, 0.5);
-    gRug.fillCircle(TILE_WIDTH / 2, TILE_HEIGHT / 2, 8);
+    gRug.beginPath();
+    gRug.moveTo(TILE_WIDTH / 2, TILE_HEIGHT / 2 - 4);
+    gRug.lineTo(TILE_WIDTH / 2 + 5, TILE_HEIGHT / 2);
+    gRug.lineTo(TILE_WIDTH / 2, TILE_HEIGHT / 2 + 4);
+    gRug.lineTo(TILE_WIDTH / 2 - 5, TILE_HEIGHT / 2);
+    gRug.closePath();
+    gRug.fillPath();
 
     gRug.generateTexture('tile_rug', TILE_WIDTH, TILE_HEIGHT);
     gRug.destroy();
+
+    // Rug border tile - has a decorative border stripe
+    const gRugB = this.make.graphics({ x: 0, y: 0 });
+    gRugB.fillStyle(COLORS.rug, 1);
+    gRugB.beginPath();
+    gRugB.moveTo(TILE_WIDTH / 2, 0);
+    gRugB.lineTo(TILE_WIDTH, TILE_HEIGHT / 2);
+    gRugB.lineTo(TILE_WIDTH / 2, TILE_HEIGHT);
+    gRugB.lineTo(0, TILE_HEIGHT / 2);
+    gRugB.closePath();
+    gRugB.fillPath();
+
+    // Inner border stripe (gold outline inset)
+    gRugB.lineStyle(2, COLORS.rugPattern, 0.7);
+    gRugB.beginPath();
+    gRugB.moveTo(TILE_WIDTH / 2, 3);
+    gRugB.lineTo(TILE_WIDTH - 3, TILE_HEIGHT / 2);
+    gRugB.lineTo(TILE_WIDTH / 2, TILE_HEIGHT - 3);
+    gRugB.lineTo(3, TILE_HEIGHT / 2);
+    gRugB.closePath();
+    gRugB.strokePath();
+
+    // Outer dark border
+    gRugB.lineStyle(2, COLORS.rugBorder, 0.8);
+    gRugB.beginPath();
+    gRugB.moveTo(TILE_WIDTH / 2, 0);
+    gRugB.lineTo(TILE_WIDTH, TILE_HEIGHT / 2);
+    gRugB.lineTo(TILE_WIDTH / 2, TILE_HEIGHT);
+    gRugB.lineTo(0, TILE_HEIGHT / 2);
+    gRugB.closePath();
+    gRugB.strokePath();
+
+    gRugB.generateTexture('tile_rug_border', TILE_WIDTH, TILE_HEIGHT);
+    gRugB.destroy();
   }
 
   private generateFurniture(): void {
@@ -281,9 +335,14 @@ export class BootScene extends Phaser.Scene {
     gWork.lineStyle(1.5, 0x2d3436, 1);
     gWork.lineBetween(14, 18, 18, 18);
 
-    // Sparkle
+    // Sparkle (4-point star drawn manually)
     gWork.fillStyle(0xffeaa7, 1);
-    gWork.fillStar(26, 6, 4, 2, 4);
+    // Vertical diamond
+    gWork.fillTriangle(26, 2, 24, 6, 28, 6);
+    gWork.fillTriangle(26, 10, 24, 6, 28, 6);
+    // Horizontal diamond
+    gWork.fillTriangle(22, 6, 26, 4, 26, 8);
+    gWork.fillTriangle(30, 6, 26, 4, 26, 8);
 
     gWork.generateTexture(`${key}_working`, size, size);
     gWork.destroy();

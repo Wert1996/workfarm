@@ -53,6 +53,30 @@ export interface AgentMemory {
   context: Record<string, any>;
 }
 
+// ============ Sessions ============
+
+export type SessionStatus = 'starting' | 'active' | 'waiting_input' | 'completed' | 'error';
+
+export type SessionMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'thinking' | 'system';
+
+export interface SessionMessage {
+  id: string;
+  timestamp: number;
+  type: SessionMessageType;
+  content: string;
+  metadata?: Record<string, any>;
+}
+
+export interface AgentSession {
+  id: string;
+  agentId: string;
+  taskId: string;
+  status: SessionStatus;
+  messages: SessionMessage[];
+  startedAt: number;
+  lastActivityAt: number;
+}
+
 // ============ Events ============
 
 export type GameEventType =
@@ -65,7 +89,11 @@ export type GameEventType =
   | 'task_started'
   | 'task_completed'
   | 'task_failed'
-  | 'claude_progress';
+  | 'claude_progress'
+  | 'session_created'
+  | 'session_message'
+  | 'session_status_changed'
+  | 'session_ended';
 
 export interface GameEvent {
   type: GameEventType;

@@ -1,6 +1,7 @@
 import { Agent, Task } from '../types';
 import { AgentManager } from './AgentManager';
 import { TaskManager } from './TaskManager';
+import { SessionManager } from './SessionManager';
 import { eventBus } from './EventBus';
 
 interface ClaudeExecuteResult {
@@ -11,9 +12,12 @@ interface ClaudeExecuteResult {
   error?: string;
 }
 
+const FIND_SKILLS_SUMMARY = `You have access to the "find-skills" skill. When users ask about capabilities or how to do something, you can search for installable skills using: npx skills find [query]. Install with: npx skills add <package> -g -y. Browse at https://skills.sh/`;
+
 export class ClaudeCodeBridge {
   private agentManager: AgentManager;
   private taskManager: TaskManager;
+  private sessionManager: SessionManager;
   private workingDirectory: string = '';
   private activeExecutions: Map<string, boolean> = new Map();
   private progressCleanup: (() => void) | null = null;
@@ -21,7 +25,9 @@ export class ClaudeCodeBridge {
   constructor(agentManager: AgentManager, taskManager: TaskManager) {
     this.agentManager = agentManager;
     this.taskManager = taskManager;
+    this.sessionManager = new SessionManager();
     this.setupProgressListener();
+    this.setupSessionListeners();
   }
 
   private setupProgressListener(): void {
@@ -30,11 +36,45 @@ export class ClaudeCodeBridge {
     });
   }
 
+  private setupSessionListeners(): void {
+    eventBus.on('session_ended', (event) => {
+      const { agentId, taskId, status } = event.data;
+      const session = this.sessionManager.getSession(event.data.sessionId);
+
+      if (status === 'completed') {
+        // Extract result from session messages
+        const assistantMessages = session?.messages
+          .filter(m => m.type === 'assistant')
+          .map(m => m.content) || [];
+        const result = assistantMessages.join('\n') || 'Task completed';
+
+        // Save to memory
+        const task = this.taskManager.getTask(taskId);
+        if (task) {
+          this.agentManager.addConversation(agentId, 'user', task.description, taskId);
+          this.agentManager.addConversation(agentId, 'assistant', result, taskId);
+        }
+
+        this.taskManager.completeTask(taskId, result);
+        this.agentManager.incrementTasksCompleted(agentId);
+        this.agentManager.unassignTask(agentId);
+      } else if (status === 'error') {
+        this.taskManager.failTask(taskId, 'Session ended with error');
+        this.agentManager.unassignTask(agentId);
+      }
+
+      this.activeExecutions.delete(agentId);
+      this.agentManager.save();
+      this.taskManager.save();
+    });
+  }
+
   destroy(): void {
     if (this.progressCleanup) {
       this.progressCleanup();
       this.progressCleanup = null;
     }
+    this.sessionManager.destroy();
   }
 
   async initialize(): Promise<void> {
@@ -49,12 +89,27 @@ export class ClaudeCodeBridge {
     const dir = await window.workfarm.selectDirectory();
     if (dir) {
       this.workingDirectory = dir;
+      // Ensure skills are installed in the new project directory
+      await this.ensureSkills();
     }
     return dir;
   }
 
   getWorkingDirectory(): string {
     return this.workingDirectory;
+  }
+
+  getSessionManager(): SessionManager {
+    return this.sessionManager;
+  }
+
+  private async ensureSkills(): Promise<void> {
+    if (!this.workingDirectory) return;
+    try {
+      await window.workfarm.ensureSkills(this.workingDirectory);
+    } catch (error) {
+      console.error('Failed to ensure skills:', error);
+    }
   }
 
   private buildPrompt(agent: Agent, task: Task): string {
@@ -101,48 +156,55 @@ export class ClaudeCodeBridge {
       this.taskManager.startTask(taskId);
       this.taskManager.addLog(taskId, `${agent.name} started working`);
 
+      // Ensure skills before starting
+      await this.ensureSkills();
+
       const prompt = this.buildPrompt(agent, task);
 
-      const result: ClaudeExecuteResult = await window.workfarm.claudeCodeExecute({
+      // Start an interactive session instead of one-shot execution
+      await this.sessionManager.startSession(
         agentId,
+        taskId,
         prompt,
-        workingDirectory: this.workingDirectory,
-        thinkingBudget: 'medium',
-      });
+        this.workingDirectory,
+        FIND_SKILLS_SUMMARY
+      );
 
-      if (result.exitCode === 0) {
-        const response = result.parsed?.result || result.stdout || 'Task completed';
-
-        // Save to memory
-        this.agentManager.addConversation(agentId, 'user', task.description, taskId);
-        this.agentManager.addConversation(agentId, 'assistant', response, taskId);
-
-        // Update task
-        this.taskManager.completeTask(taskId, response);
-        this.agentManager.incrementTasksCompleted(agentId);
-        this.agentManager.unassignTask(agentId);
-
-        return { success: true, response };
-      } else {
-        const errorMsg = result.error || result.stderr || 'Unknown error';
-        this.taskManager.failTask(taskId, errorMsg);
-        this.agentManager.unassignTask(agentId);
-
-        return { success: false, response: '', error: errorMsg };
-      }
+      // Session completion is handled asynchronously via session_ended event
+      return { success: true, response: 'Session started' };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.taskManager.failTask(taskId, errorMsg);
       this.agentManager.unassignTask(agentId);
-      return { success: false, response: '', error: errorMsg };
-    } finally {
       this.activeExecutions.delete(agentId);
-      await this.agentManager.save();
-      await this.taskManager.save();
+      return { success: false, response: '', error: errorMsg };
+    }
+  }
+
+  async sendMessageToAgent(agentId: string, message: string): Promise<boolean> {
+    const session = this.sessionManager.getActiveSessionForAgent(agentId);
+    if (!session) return false;
+
+    try {
+      await this.sessionManager.sendMessage(session.id, message, this.workingDirectory);
+      return true;
+    } catch (error) {
+      console.error('Failed to send message to agent:', error);
+      return false;
     }
   }
 
   async cancelExecution(agentId: string): Promise<boolean> {
+    // Try session-based cancellation first
+    const session = this.sessionManager.getActiveSessionForAgent(agentId);
+    if (session) {
+      await this.sessionManager.stopSession(session.id);
+      this.activeExecutions.delete(agentId);
+      this.agentManager.updateAgentState(agentId, 'idle');
+      return true;
+    }
+
+    // Fall back to legacy cancellation
     const result = await window.workfarm.claudeCodeCancel(agentId);
     if (result.success) {
       this.activeExecutions.delete(agentId);

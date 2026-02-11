@@ -12,7 +12,7 @@ export interface WorkFarmAPI {
   loadAgentMemory: (agentId: string) => Promise<{ conversations: any[]; context: any }>;
   saveAgentMemory: (agentId: string, memory: any) => Promise<{ success: boolean; error?: string }>;
 
-  // Claude Code integration
+  // Claude Code integration (legacy)
   claudeCodeExecute: (options: {
     agentId: string;
     prompt: string;
@@ -27,12 +27,33 @@ export interface WorkFarmAPI {
   }>;
   claudeCodeCancel: (agentId: string) => Promise<{ success: boolean; error?: string }>;
 
-  // Progress listener
+  // Progress listener (legacy)
   onClaudeCodeProgress: (callback: (data: {
     agentId: string;
     chunk: string;
     type: 'stdout' | 'stderr';
   }) => void) => () => void;
+
+  // Session-based Claude Code integration
+  startSession: (options: {
+    sessionId: string;
+    prompt: string;
+    workingDirectory: string;
+    systemPrompt?: string;
+  }) => Promise<{ success: boolean; sessionId: string }>;
+  sendToSession: (options: {
+    sessionId: string;
+    message: string;
+    workingDirectory: string;
+  }) => Promise<{ success: boolean }>;
+  stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
+  onSessionEvent: (callback: (data: {
+    sessionId: string;
+    event: any;
+  }) => void) => () => void;
+
+  // Skills
+  ensureSkills: (workingDirectory: string) => Promise<{ success: boolean; skillContent?: string; error?: string }>;
 
   // File system
   getWorkingDirectory: () => Promise<string>;
@@ -54,12 +75,25 @@ const api: WorkFarmAPI = {
   claudeCodeExecute: (options) => ipcRenderer.invoke('claude-code-execute', options),
   claudeCodeCancel: (agentId) => ipcRenderer.invoke('claude-code-cancel', agentId),
 
-  // Progress listener with cleanup
+  // Progress listener with cleanup (legacy)
   onClaudeCodeProgress: (callback) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('claude-code-progress', handler);
     return () => ipcRenderer.removeListener('claude-code-progress', handler);
   },
+
+  // Session-based Claude Code integration
+  startSession: (options) => ipcRenderer.invoke('claude-session-start', options),
+  sendToSession: (options) => ipcRenderer.invoke('claude-session-send', options),
+  stopSession: (sessionId) => ipcRenderer.invoke('claude-session-stop', sessionId),
+  onSessionEvent: (callback) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('claude-session-event', handler);
+    return () => ipcRenderer.removeListener('claude-session-event', handler);
+  },
+
+  // Skills
+  ensureSkills: (workingDirectory) => ipcRenderer.invoke('ensure-skills', workingDirectory),
 
   // File system
   getWorkingDirectory: () => ipcRenderer.invoke('get-working-directory'),

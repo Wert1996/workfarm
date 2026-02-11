@@ -5,6 +5,7 @@ import * as fs from 'fs';
 
 let mainWindow: BrowserWindow | null = null;
 const claudeProcesses: Map<string, ChildProcess> = new Map();
+const sessionProcesses: Map<string, ChildProcess> = new Map();
 
 // Data directory for persistence
 const dataDir = path.join(app.getPath('userData'), 'workfarm-data');
@@ -49,6 +50,8 @@ function createWindow() {
     // Kill all claude processes on close
     claudeProcesses.forEach((proc) => proc.kill());
     claudeProcesses.clear();
+    sessionProcesses.forEach((proc) => proc.kill());
+    sessionProcesses.clear();
   });
 }
 
@@ -247,4 +250,160 @@ ipcMain.handle('select-directory', async () => {
     return null;
   }
   return result.filePaths[0];
+});
+
+// ============ Session IPC Handlers ============
+
+function spawnSessionProcess(
+  sessionId: string,
+  args: string[],
+  workingDirectory: string
+): void {
+  const claude = spawn('claude', args, {
+    cwd: workingDirectory,
+    env: { ...process.env },
+  });
+
+  sessionProcesses.set(sessionId, claude);
+
+  let lineBuffer = '';
+
+  claude.stdout.on('data', (data: Buffer) => {
+    lineBuffer += data.toString();
+    const lines = lineBuffer.split('\n');
+    // Keep the last incomplete line in the buffer
+    lineBuffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const event = JSON.parse(trimmed);
+        mainWindow?.webContents.send('claude-session-event', {
+          sessionId,
+          event,
+        });
+      } catch {
+        // Non-JSON output, send as a system message
+        mainWindow?.webContents.send('claude-session-event', {
+          sessionId,
+          event: { type: 'system', content: trimmed },
+        });
+      }
+    }
+  });
+
+  claude.stderr.on('data', (data: Buffer) => {
+    const chunk = data.toString();
+    mainWindow?.webContents.send('claude-session-event', {
+      sessionId,
+      event: { type: 'system', subtype: 'stderr', content: chunk },
+    });
+  });
+
+  claude.on('close', (code: number | null) => {
+    // Flush remaining buffer
+    if (lineBuffer.trim()) {
+      try {
+        const event = JSON.parse(lineBuffer.trim());
+        mainWindow?.webContents.send('claude-session-event', {
+          sessionId,
+          event,
+        });
+      } catch {
+        // ignore
+      }
+    }
+
+    sessionProcesses.delete(sessionId);
+    mainWindow?.webContents.send('claude-session-event', {
+      sessionId,
+      event: { type: 'result', subtype: 'close', exitCode: code },
+    });
+  });
+
+  claude.on('error', (error: Error) => {
+    sessionProcesses.delete(sessionId);
+    mainWindow?.webContents.send('claude-session-event', {
+      sessionId,
+      event: { type: 'result', subtype: 'error', error: error.message },
+    });
+  });
+}
+
+ipcMain.handle('claude-session-start', async (_event, options: {
+  sessionId: string;
+  prompt: string;
+  workingDirectory: string;
+  systemPrompt?: string;
+}) => {
+  const { sessionId, prompt, workingDirectory, systemPrompt } = options;
+
+  const args = ['--print', '--output-format', 'stream-json', '--session-id', sessionId];
+
+  if (systemPrompt) {
+    args.push('--append-system-prompt', systemPrompt);
+  }
+
+  args.push(prompt);
+
+  spawnSessionProcess(sessionId, args, workingDirectory);
+  return { success: true, sessionId };
+});
+
+ipcMain.handle('claude-session-send', async (_event, options: {
+  sessionId: string;
+  message: string;
+  workingDirectory: string;
+}) => {
+  const { sessionId, message, workingDirectory } = options;
+
+  // Kill existing process for this session if still running
+  const existing = sessionProcesses.get(sessionId);
+  if (existing) {
+    existing.kill('SIGTERM');
+    sessionProcesses.delete(sessionId);
+  }
+
+  const args = ['--print', '--resume', sessionId, '--output-format', 'stream-json', message];
+
+  spawnSessionProcess(sessionId, args, workingDirectory);
+  return { success: true };
+});
+
+ipcMain.handle('claude-session-stop', async (_event, sessionId: string) => {
+  const proc = sessionProcesses.get(sessionId);
+  if (proc) {
+    proc.kill('SIGTERM');
+    sessionProcesses.delete(sessionId);
+    return { success: true };
+  }
+  return { success: false, error: 'No session process found' };
+});
+
+ipcMain.handle('ensure-skills', async (_event, workingDirectory: string) => {
+  try {
+    // Read SKILL.md from the workfarm app source
+    const skillSource = path.join(
+      app.isPackaged ? path.dirname(app.getPath('exe')) : path.join(__dirname, '..'),
+      '.claude', 'skills', 'find-skills', 'SKILL.md'
+    );
+
+    if (!fs.existsSync(skillSource)) {
+      return { success: false, error: `Skill source not found at ${skillSource}` };
+    }
+
+    const skillContent = fs.readFileSync(skillSource, 'utf-8');
+
+    // Write to the target project directory
+    const targetDir = path.join(workingDirectory, '.claude', 'skills', 'find-skills');
+    fs.mkdirSync(targetDir, { recursive: true });
+
+    const targetFile = path.join(targetDir, 'SKILL.md');
+    fs.writeFileSync(targetFile, skillContent);
+
+    return { success: true, skillContent };
+  } catch (error) {
+    return { success: false, error: String(error) };
+  }
 });
