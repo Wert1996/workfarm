@@ -170,7 +170,7 @@ export class UIScene extends Phaser.Scene {
           display: block;
         }
         #agent-panel.has-session {
-          width: 420px;
+          width: 520px;
         }
         #agent-panel h2 {
           margin: 0 0 16px 0;
@@ -287,7 +287,7 @@ export class UIScene extends Phaser.Scene {
           background: #2d3436;
           border-radius: 6px;
           padding: 12px;
-          max-height: 280px;
+          max-height: calc(100vh - 450px);
           overflow-y: auto;
           font-size: 12px;
           font-family: monospace;
@@ -314,8 +314,8 @@ export class UIScene extends Phaser.Scene {
         .session-msg.tool_result {
           color: #636e72;
           background: rgba(0, 184, 148, 0.03);
-          max-height: 60px;
-          overflow: hidden;
+          max-height: 200px;
+          overflow-y: auto;
           font-size: 11px;
         }
         .session-msg.assistant {
@@ -649,12 +649,19 @@ export class UIScene extends Phaser.Scene {
       this.taskManager.assignAgent(task.id, agentId);
       this.agentManager.assignTask(agentId, task.id);
 
-      // Execute the task
-      this.claudeBridge.executeTask(agentId, task.id);
+      // Execute the task — await so panel refreshes after session is created
+      this.claudeBridge.executeTask(agentId, task.id).then((result) => {
+        this.showAgentPanel(agentId);
+        if (!result.success) {
+          console.error('executeTask failed:', result.error);
+          this.showNotification(`Task failed: ${result.error || 'Unknown error'}`);
+        }
+      }).catch((err) => {
+        console.error('executeTask error:', err);
+        this.showNotification(`Error: ${err.message || err}`);
+      });
 
       input.value = '';
-      // Brief delay to let session start before refreshing
-      setTimeout(() => this.showAgentPanel(agentId), 100);
       this.updateTaskList();
     });
 
@@ -694,9 +701,13 @@ export class UIScene extends Phaser.Scene {
     panel.classList.add('visible');
   }
 
+  private stripAnsi(text: string): string {
+    // Remove ANSI escape codes (color, cursor, etc.)
+    return text.replace(/\x1b\[[0-9;]*[a-zA-Z]|\[[\d;]*m/g, '');
+  }
+
   private renderSessionMessage(msg: SessionMessage): string {
-    const content = this.escapeHtml(msg.content);
-    const truncated = content.length > 300 ? content.substring(0, 300) + '...' : content;
+    const content = this.escapeHtml(this.stripAnsi(msg.content));
 
     if (msg.type === 'tool_use') {
       const toolName = msg.metadata?.toolName || 'tool';
@@ -704,11 +715,11 @@ export class UIScene extends Phaser.Scene {
     }
 
     if (msg.type === 'tool_result') {
-      const shortContent = content.length > 100 ? content.substring(0, 100) + '...' : content;
+      const shortContent = content.length > 500 ? content.substring(0, 500) + '...' : content;
       return `<div class="session-msg tool_result">${shortContent}</div>`;
     }
 
-    return `<div class="session-msg ${msg.type}">${truncated}</div>`;
+    return `<div class="session-msg ${msg.type}">${content}</div>`;
   }
 
   private escapeHtml(text: string): string {

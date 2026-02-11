@@ -1,11 +1,25 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import * as path from 'path';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, execSync, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 
 let mainWindow: BrowserWindow | null = null;
 const claudeProcesses: Map<string, ChildProcess> = new Map();
 const sessionProcesses: Map<string, ChildProcess> = new Map();
+
+// Resolved path to the claude binary (found at startup)
+let claudePath: string = 'claude';
+
+function resolveClaudePath(): void {
+  try {
+    // Use shell to resolve the full path, inheriting the user's PATH
+    claudePath = execSync('which claude', { encoding: 'utf-8', shell: '/bin/sh' }).trim();
+    console.log(`Resolved claude binary: ${claudePath}`);
+  } catch {
+    console.warn('Could not resolve claude binary path, falling back to "claude"');
+    claudePath = 'claude';
+  }
+}
 
 // Data directory for persistence
 const dataDir = path.join(app.getPath('userData'), 'workfarm-data');
@@ -57,6 +71,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   ensureDataDir();
+  resolveClaudePath();
   createWindow();
 
   app.on('activate', () => {
@@ -259,16 +274,19 @@ function spawnSessionProcess(
   args: string[],
   workingDirectory: string
 ): void {
-  const claude = spawn('claude', args, {
+  const claude = spawn(claudePath, args, {
     cwd: workingDirectory,
     env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
   sessionProcesses.set(sessionId, claude);
 
   let lineBuffer = '';
+  let hasErrored = false;
 
   claude.stdout.on('data', (data: Buffer) => {
+    console.log('[workfarm] stdout chunk:', data.toString().substring(0, 200));
     lineBuffer += data.toString();
     const lines = lineBuffer.split('\n');
     // Keep the last incomplete line in the buffer
@@ -295,6 +313,7 @@ function spawnSessionProcess(
 
   claude.stderr.on('data', (data: Buffer) => {
     const chunk = data.toString();
+    console.log('[workfarm] stderr:', chunk);
     mainWindow?.webContents.send('claude-session-event', {
       sessionId,
       event: { type: 'system', subtype: 'stderr', content: chunk },
@@ -302,6 +321,10 @@ function spawnSessionProcess(
   });
 
   claude.on('close', (code: number | null) => {
+    console.log('[workfarm] Process closed with code:', code);
+    // Skip if already handled by error event
+    if (hasErrored) return;
+
     // Flush remaining buffer
     if (lineBuffer.trim()) {
       try {
@@ -316,13 +339,16 @@ function spawnSessionProcess(
     }
 
     sessionProcesses.delete(sessionId);
+    const subtype = (code !== null && code !== 0) ? 'error' : 'close';
     mainWindow?.webContents.send('claude-session-event', {
       sessionId,
-      event: { type: 'result', subtype: 'close', exitCode: code },
+      event: { type: 'result', subtype, exitCode: code },
     });
   });
 
   claude.on('error', (error: Error) => {
+    console.error('[workfarm] Spawn error:', error.message);
+    hasErrored = true;
     sessionProcesses.delete(sessionId);
     mainWindow?.webContents.send('claude-session-event', {
       sessionId,
@@ -339,13 +365,16 @@ ipcMain.handle('claude-session-start', async (_event, options: {
 }) => {
   const { sessionId, prompt, workingDirectory, systemPrompt } = options;
 
-  const args = ['--print', '--output-format', 'stream-json', '--session-id', sessionId];
+  const args = ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--session-id', sessionId];
 
   if (systemPrompt) {
     args.push('--append-system-prompt', systemPrompt);
   }
 
   args.push(prompt);
+
+  console.log('[workfarm] Spawning claude session:', claudePath, args.map((a, i) => i < args.length - 1 ? a : a.substring(0, 80) + '...').join(' '));
+  console.log('[workfarm] Working directory:', workingDirectory);
 
   spawnSessionProcess(sessionId, args, workingDirectory);
   return { success: true, sessionId };
@@ -365,7 +394,7 @@ ipcMain.handle('claude-session-send', async (_event, options: {
     sessionProcesses.delete(sessionId);
   }
 
-  const args = ['--print', '--resume', sessionId, '--output-format', 'stream-json', message];
+  const args = ['--print', '--verbose', '--resume', sessionId, '--output-format', 'stream-json', '--include-partial-messages', message];
 
   spawnSessionProcess(sessionId, args, workingDirectory);
   return { success: true };

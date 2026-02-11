@@ -79,6 +79,21 @@ export class ClaudeCodeBridge {
 
   async initialize(): Promise<void> {
     this.workingDirectory = await window.workfarm.getWorkingDirectory();
+
+    // Clear any stale execution state from agents that were mid-task when app closed
+    this.activeExecutions.clear();
+    for (const agent of this.agentManager.getAllAgents()) {
+      if (agent.state === 'working' || agent.state === 'thinking') {
+        this.agentManager.updateAgentState(agent.id, 'idle');
+      }
+      if (agent.currentTaskId) {
+        const task = this.taskManager.getTask(agent.currentTaskId);
+        if (task && task.status === 'in_progress') {
+          this.taskManager.failTask(agent.currentTaskId, 'Interrupted by app restart');
+        }
+        this.agentManager.unassignTask(agent.id);
+      }
+    }
   }
 
   setWorkingDirectory(dir: string): void {
@@ -141,26 +156,34 @@ export class ClaudeCodeBridge {
     const agent = this.agentManager.getAgent(agentId);
     const task = this.taskManager.getTask(taskId);
 
+    console.log('[executeTask] agent:', agent?.name, 'task:', task?.id, 'activeExecutions:', this.activeExecutions.get(agentId));
+
     if (!agent || !task) {
+      console.error('[executeTask] Agent or task not found');
       return { success: false, response: '', error: 'Agent or task not found' };
     }
 
     if (this.activeExecutions.get(agentId)) {
+      console.error('[executeTask] Agent is busy — activeExecutions stuck');
       return { success: false, response: '', error: 'Agent is busy' };
     }
 
     this.activeExecutions.set(agentId, true);
 
     try {
+      console.log('[executeTask] step 1: updating state');
       this.agentManager.updateAgentState(agentId, 'thinking');
       this.taskManager.startTask(taskId);
       this.taskManager.addLog(taskId, `${agent.name} started working`);
 
+      console.log('[executeTask] step 2: ensuring skills, workingDir:', this.workingDirectory);
       // Ensure skills before starting
       await this.ensureSkills();
 
+      console.log('[executeTask] step 3: building prompt');
       const prompt = this.buildPrompt(agent, task);
 
+      console.log('[executeTask] step 4: starting session');
       // Start an interactive session instead of one-shot execution
       await this.sessionManager.startSession(
         agentId,
@@ -170,9 +193,11 @@ export class ClaudeCodeBridge {
         FIND_SKILLS_SUMMARY
       );
 
+      console.log('[executeTask] step 5: session started');
       // Session completion is handled asynchronously via session_ended event
       return { success: true, response: 'Session started' };
     } catch (error) {
+      console.error('[executeTask] caught error:', error);
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.taskManager.failTask(taskId, errorMsg);
       this.agentManager.unassignTask(agentId);

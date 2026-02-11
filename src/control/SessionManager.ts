@@ -95,14 +95,20 @@ export class SessionManager {
   }
 
   private handleStreamEvent(sessionId: string, event: any): void {
+    console.log('[SessionManager] event received:', sessionId.substring(0, 8), event.type, event.subtype || '');
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      console.warn('[SessionManager] no session found for:', sessionId.substring(0, 8));
+      return;
+    }
 
     session.lastActivityAt = Date.now();
 
-    // Handle the result/close event (session ended)
+    // Handle the result event (session ended)
+    // CLI sends subtype 'success' or 'error'; process close handler sends 'close' or 'error'
     if (event.type === 'result') {
-      if (event.subtype === 'close' || event.subtype === 'error') {
+      const isEnd = event.subtype === 'close' || event.subtype === 'success' || event.subtype === 'error';
+      if (isEnd) {
         const finalStatus: SessionStatus = event.subtype === 'error' ? 'error' : 'completed';
         // Extract result text if present
         if (event.result) {
@@ -204,6 +210,9 @@ export class SessionManager {
   private endSession(sessionId: string, status: SessionStatus): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+
+    // Prevent double-ending (both 'error' and 'close' events can fire)
+    if (session.status === 'completed' || session.status === 'error') return;
 
     session.status = status;
     session.lastActivityAt = Date.now();
