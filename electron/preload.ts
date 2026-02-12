@@ -40,11 +40,13 @@ export interface WorkFarmAPI {
     prompt: string;
     workingDirectory: string;
     systemPrompt?: string;
+    allowedTools?: string[];
   }) => Promise<{ success: boolean; sessionId: string }>;
   sendToSession: (options: {
     sessionId: string;
     message: string;
     workingDirectory: string;
+    allowedTools?: string[];
   }) => Promise<{ success: boolean }>;
   stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
   onSessionEvent: (callback: (data: {

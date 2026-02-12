@@ -37,9 +37,18 @@ export class ClaudeCodeBridge {
   }
 
   private setupSessionListeners(): void {
+    // Listen for permission requests (UI handles the actual prompt)
+    eventBus.on('permission_requested', () => {
+      // No-op here; UIScene handles the user prompt.
+      // The session is paused in waiting_input state.
+    });
+
     eventBus.on('session_ended', (event) => {
       const { agentId, taskId, status } = event.data;
       const session = this.sessionManager.getSession(event.data.sessionId);
+
+      // Skip cleanup if session is paused for permission approval
+      if (session && session.status === 'waiting_input') return;
 
       if (status === 'completed') {
         // Extract result from session messages
@@ -190,7 +199,8 @@ export class ClaudeCodeBridge {
         taskId,
         prompt,
         this.workingDirectory,
-        FIND_SKILLS_SUMMARY
+        FIND_SKILLS_SUMMARY,
+        agent.approvedTools
       );
 
       console.log('[executeTask] step 5: session started');
@@ -217,6 +227,26 @@ export class ClaudeCodeBridge {
       console.error('Failed to send message to agent:', error);
       return false;
     }
+  }
+
+  async approveToolPermission(agentId: string, toolName: string): Promise<void> {
+    this.agentManager.addApprovedTool(agentId, toolName);
+    const session = this.sessionManager.getActiveSessionForAgent(agentId);
+    if (session) {
+      await this.sessionManager.resumeSession(
+        session.id,
+        this.agentManager.getApprovedTools(agentId),
+        this.workingDirectory
+      );
+    }
+  }
+
+  denyToolPermission(agentId: string): void {
+    const session = this.sessionManager.getActiveSessionForAgent(agentId);
+    if (session) {
+      this.sessionManager.denyPermission(session.id);
+    }
+    // Normal session_ended flow handles cleanup
   }
 
   async cancelExecution(agentId: string): Promise<boolean> {

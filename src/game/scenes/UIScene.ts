@@ -424,6 +424,92 @@ export class UIScene extends Phaser.Scene {
           max-height: 200px;
           overflow-y: auto;
         }
+
+        /* Permission Request Banner */
+        .permission-request {
+          background: linear-gradient(180deg, rgba(253,203,110,0.15) 0%, rgba(253,203,110,0.08) 100%);
+          border: 1px solid #fdcb6e;
+          border-radius: 8px;
+          padding: 12px 16px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 8px;
+        }
+        .permission-request .perm-info {
+          flex: 1;
+          font-size: 13px;
+          color: #ffeaa7;
+        }
+        .permission-request .perm-tool {
+          font-weight: bold;
+          color: #fdcb6e;
+        }
+        .permission-request .perm-actions {
+          display: flex;
+          gap: 8px;
+        }
+        .permission-request .btn-allow {
+          background: linear-gradient(180deg, #00b894 0%, #00a085 100%);
+          border: none;
+          color: white;
+          padding: 6px 14px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-family: 'Georgia', serif;
+          font-size: 12px;
+        }
+        .permission-request .btn-allow:hover {
+          background: linear-gradient(180deg, #00cba4 0%, #00b894 100%);
+        }
+        .permission-request .btn-deny {
+          background: linear-gradient(180deg, #636e72 0%, #535c5f 100%);
+          border: none;
+          color: white;
+          padding: 6px 14px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-family: 'Georgia', serif;
+          font-size: 12px;
+        }
+        .permission-request .btn-deny:hover {
+          background: linear-gradient(180deg, #737e82 0%, #636e72 100%);
+        }
+
+        /* Approved Tools List */
+        .tools-list {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+        .tool-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          background: #3d4449;
+          border: 1px solid #636e72;
+          border-radius: 12px;
+          padding: 4px 10px;
+          font-size: 11px;
+          color: #dfe6e9;
+        }
+        .tool-badge.baseline {
+          border-color: #6c5ce755;
+          color: #a29bfe;
+        }
+        .tool-badge .remove-tool {
+          background: none;
+          border: none;
+          color: #b2bec3;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 0 0 0 2px;
+          line-height: 1;
+        }
+        .tool-badge .remove-tool:hover {
+          color: #d63031;
+        }
       </style>
 
       <!-- Top Bar -->
@@ -509,6 +595,20 @@ export class UIScene extends Phaser.Scene {
         this.showAgentPanel(this.selectedAgentId);
       }
     });
+
+    // Permission request events
+    eventBus.on('permission_requested', (event) => {
+      const { agentId, toolName } = event.data;
+      if (this.selectedAgentId === agentId) {
+        // Agent panel is open — refresh it to show the permission banner
+        this.showAgentPanel(agentId);
+      } else {
+        // Agent panel is NOT open — show a notification
+        const agent = this.agentManager.getAgent(agentId);
+        const name = agent?.name || 'Agent';
+        this.showPermissionNotification(agentId, name, toolName);
+      }
+    });
   }
 
   private async selectDirectory(): Promise<void> {
@@ -586,6 +686,31 @@ export class UIScene extends Phaser.Scene {
       `;
     }
 
+    const baselineTools = ['Read', 'Glob', 'Grep'];
+    const toolBadgesHtml = (agent.approvedTools || []).map(tool => {
+      const isBaseline = baselineTools.includes(tool);
+      return `<span class="tool-badge ${isBaseline ? 'baseline' : ''}" data-tool="${this.escapeHtml(tool)}">
+        ${this.escapeHtml(tool)}
+        ${!isBaseline ? `<button class="remove-tool" data-tool="${this.escapeHtml(tool)}">&times;</button>` : ''}
+      </span>`;
+    }).join('');
+
+    // Build permission request banners if session is waiting for permission
+    let permissionBannersHtml = '';
+    if (activeSession && activeSession.pendingPermissions && activeSession.pendingPermissions.length > 0) {
+      permissionBannersHtml = activeSession.pendingPermissions.map(perm =>
+        `<div class="permission-request" data-tool="${this.escapeHtml(perm.toolName)}">
+          <div class="perm-info">
+            ${agent.name} needs permission for <span class="perm-tool">${this.escapeHtml(perm.toolName)}</span>
+          </div>
+          <div class="perm-actions">
+            <button class="btn-allow" data-tool="${this.escapeHtml(perm.toolName)}">Allow</button>
+            <button class="btn-deny" data-tool="${this.escapeHtml(perm.toolName)}">Deny</button>
+          </div>
+        </div>`
+      ).join('');
+    }
+
     contentEl.innerHTML = `
       <div class="panel-section">
         <label>Token Budget</label>
@@ -607,6 +732,15 @@ export class UIScene extends Phaser.Scene {
           </div>
         </div>
       </div>
+
+      <div class="panel-section">
+        <label>Approved Tools</label>
+        <div class="tools-list" id="tools-list">
+          ${toolBadgesHtml || '<span class="empty-state">None</span>'}
+        </div>
+      </div>
+
+      ${permissionBannersHtml}
 
       <div class="panel-section">
         <label>Current Task</label>
@@ -696,6 +830,38 @@ export class UIScene extends Phaser.Scene {
         this.agentManager.fireAgent(agentId);
         this.hideAgentPanel();
       }
+    });
+
+    // Tool removal handlers
+    document.getElementById('tools-list')?.querySelectorAll('.remove-tool').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const toolName = (btn as HTMLElement).dataset.tool;
+        if (toolName) {
+          this.agentManager.removeApprovedTool(agentId, toolName);
+          this.showAgentPanel(agentId); // Refresh panel
+        }
+      });
+    });
+
+    // Permission Allow/Deny handlers
+    contentEl.querySelectorAll('.permission-request .btn-allow').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const toolName = (btn as HTMLElement).dataset.tool;
+        if (toolName) {
+          this.claudeBridge.approveToolPermission(agentId, toolName);
+          // Remove the banner
+          (btn as HTMLElement).closest('.permission-request')?.remove();
+        }
+      });
+    });
+
+    contentEl.querySelectorAll('.permission-request .btn-deny').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.claudeBridge.denyToolPermission(agentId);
+        // Remove all permission banners
+        contentEl.querySelectorAll('.permission-request').forEach(el => el.remove());
+      });
     });
 
     panel.classList.add('visible');
@@ -867,6 +1033,36 @@ export class UIScene extends Phaser.Scene {
         if (taskId) this.showTaskPanel(taskId);
       });
     });
+  }
+
+  private showPermissionNotification(agentId: string, agentName: string, toolName: string): void {
+    const notif = document.createElement('div');
+    notif.style.cssText = `
+      position: fixed;
+      bottom: 200px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: linear-gradient(180deg, rgba(253,203,110,0.95) 0%, rgba(225,177,90,0.95) 100%);
+      color: #2d3436;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-family: Georgia, serif;
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      z-index: 10000;
+      cursor: pointer;
+      pointer-events: auto;
+    `;
+    notif.textContent = `${agentName} needs permission for ${toolName} — click to review`;
+    notif.addEventListener('click', () => {
+      notif.remove();
+      this.selectedAgentId = agentId;
+      this.showAgentPanel(agentId);
+      this.hideTaskPanel();
+    });
+    document.body.appendChild(notif);
+    // Auto-dismiss after 10 seconds
+    setTimeout(() => notif.remove(), 10000);
   }
 
   private showNotification(message: string): void {

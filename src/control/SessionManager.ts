@@ -29,7 +29,8 @@ export class SessionManager {
     taskId: string,
     prompt: string,
     workingDir: string,
-    systemPrompt?: string
+    systemPrompt?: string,
+    allowedTools?: string[]
   ): Promise<string> {
     const sessionId = uuidv4();
 
@@ -53,6 +54,7 @@ export class SessionManager {
       prompt,
       workingDirectory: workingDir,
       systemPrompt,
+      allowedTools,
     });
 
     session.status = 'active';
@@ -61,7 +63,7 @@ export class SessionManager {
     return sessionId;
   }
 
-  async sendMessage(sessionId: string, message: string, workingDir: string): Promise<void> {
+  async sendMessage(sessionId: string, message: string, workingDir: string, allowedTools?: string[]): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -83,6 +85,7 @@ export class SessionManager {
       sessionId,
       message,
       workingDirectory: workingDir,
+      allowedTools,
     });
   }
 
@@ -109,13 +112,34 @@ export class SessionManager {
     if (event.type === 'result') {
       const isEnd = event.subtype === 'close' || event.subtype === 'success' || event.subtype === 'error';
       if (isEnd) {
-        const finalStatus: SessionStatus = event.subtype === 'error' ? 'error' : 'completed';
         // Extract result text if present
         if (event.result) {
           const msg = this.createMessage('assistant', typeof event.result === 'string' ? event.result : JSON.stringify(event.result));
           session.messages.push(msg);
           eventBus.emit('session_message', { sessionId, message: msg });
         }
+
+        // Check for permission denials before ending session
+        if (event.permission_denials && event.permission_denials.length > 0) {
+          session.pendingPermissions = event.permission_denials.map((d: any) => ({
+            toolName: d.tool_name || d.toolName || 'unknown',
+            toolInput: d.tool_input || d.toolInput || {},
+          }));
+          session.status = 'waiting_input';
+          eventBus.emit('session_status_changed', { sessionId, status: 'waiting_input' });
+          for (const denial of session.pendingPermissions) {
+            eventBus.emit('permission_requested', {
+              sessionId,
+              agentId: session.agentId,
+              taskId: session.taskId,
+              toolName: denial.toolName,
+              toolInput: denial.toolInput,
+            });
+          }
+          return; // Don't end the session — wait for user decision
+        }
+
+        const finalStatus: SessionStatus = event.subtype === 'error' ? 'error' : 'completed';
         this.endSession(sessionId, finalStatus);
         return;
       }
@@ -227,6 +251,31 @@ export class SessionManager {
       taskId: session.taskId,
       status,
     });
+  }
+
+  async resumeSession(sessionId: string, allowedTools: string[], workingDir: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    session.status = 'active';
+    session.pendingPermissions = undefined;
+    session.lastActivityAt = Date.now();
+
+    // Re-register agent mapping in case it was cleared
+    this.agentSessionMap.set(session.agentId, sessionId);
+
+    eventBus.emit('session_status_changed', { sessionId, status: 'active' });
+
+    await window.workfarm.sendToSession({
+      sessionId,
+      message: 'Permission granted. Continue your task.',
+      workingDirectory: workingDir,
+      allowedTools,
+    });
+  }
+
+  denyPermission(sessionId: string): void {
+    this.endSession(sessionId, 'completed');
   }
 
   getSession(sessionId: string): AgentSession | undefined {

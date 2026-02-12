@@ -3,6 +3,8 @@ import { Agent, AgentState, AgentMemory } from '../types';
 import { COLORS, getRandomPosition } from '../game/config';
 import { eventBus } from './EventBus';
 
+const BASELINE_TOOLS = ['Read', 'Glob', 'Grep'];
+
 // Fun names for agents
 const AGENT_NAMES = [
   'Alex', 'Sam', 'Jordan', 'Taylor', 'Morgan', 'Casey', 'Riley', 'Quinn',
@@ -19,6 +21,10 @@ export class AgentManager {
   async initialize(): Promise<void> {
     const savedAgents = await window.workfarm.loadAgents();
     for (const agent of savedAgents) {
+      // Backfill approvedTools for agents loaded from disk that don't have it
+      if (!agent.approvedTools) {
+        agent.approvedTools = [...BASELINE_TOOLS];
+      }
       this.agents.set(agent.id, agent);
       this.usedNames.add(agent.name);
     }
@@ -81,6 +87,7 @@ export class AgentManager {
       tokensUsed: 0,
       hiredAt: Date.now(),
       tasksCompleted: 0,
+      approvedTools: [...BASELINE_TOOLS],
       gridX: pos.x,
       gridY: pos.y,
     };
@@ -169,6 +176,30 @@ export class AgentManager {
     const agent = this.agents.get(agentId);
     if (!agent) return;
     agent.tasksCompleted++;
+  }
+
+  // Tool permission management
+  addApprovedTool(agentId: string, toolName: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (!agent.approvedTools.includes(toolName)) {
+      agent.approvedTools.push(toolName);
+      this.save();
+    }
+  }
+
+  removeApprovedTool(agentId: string, toolName: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    // Don't allow removing baseline tools
+    if (BASELINE_TOOLS.includes(toolName)) return;
+    agent.approvedTools = agent.approvedTools.filter(t => t !== toolName);
+    this.save();
+  }
+
+  getApprovedTools(agentId: string): string[] {
+    const agent = this.agents.get(agentId);
+    return agent?.approvedTools || [...BASELINE_TOOLS];
   }
 
   // Memory management

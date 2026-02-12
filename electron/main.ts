@@ -362,13 +362,18 @@ ipcMain.handle('claude-session-start', async (_event, options: {
   prompt: string;
   workingDirectory: string;
   systemPrompt?: string;
+  allowedTools?: string[];
 }) => {
-  const { sessionId, prompt, workingDirectory, systemPrompt } = options;
+  const { sessionId, prompt, workingDirectory, systemPrompt, allowedTools } = options;
 
   const args = ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--session-id', sessionId];
 
   if (systemPrompt) {
     args.push('--append-system-prompt', systemPrompt);
+  }
+
+  if (allowedTools && allowedTools.length > 0) {
+    args.push('--allowedTools', ...allowedTools);
   }
 
   args.push(prompt);
@@ -384,8 +389,9 @@ ipcMain.handle('claude-session-send', async (_event, options: {
   sessionId: string;
   message: string;
   workingDirectory: string;
+  allowedTools?: string[];
 }) => {
-  const { sessionId, message, workingDirectory } = options;
+  const { sessionId, message, workingDirectory, allowedTools } = options;
 
   // Kill existing process for this session if still running
   const existing = sessionProcesses.get(sessionId);
@@ -394,7 +400,13 @@ ipcMain.handle('claude-session-send', async (_event, options: {
     sessionProcesses.delete(sessionId);
   }
 
-  const args = ['--print', '--verbose', '--resume', sessionId, '--output-format', 'stream-json', '--include-partial-messages', message];
+  const args = ['--print', '--verbose', '--resume', sessionId, '--output-format', 'stream-json', '--include-partial-messages'];
+
+  if (allowedTools && allowedTools.length > 0) {
+    args.push('--allowedTools', ...allowedTools);
+  }
+
+  args.push(message);
 
   spawnSessionProcess(sessionId, args, workingDirectory);
   return { success: true };

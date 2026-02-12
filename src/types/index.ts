@@ -12,6 +12,7 @@ export interface Agent {
   tokensUsed: number;   // Total tokens used lifetime
   hiredAt: number;
   tasksCompleted: number;
+  approvedTools: string[];
   // Position tracking for wandering
   gridX: number;
   gridY: number;
@@ -75,6 +76,7 @@ export interface AgentSession {
   messages: SessionMessage[];
   startedAt: number;
   lastActivityAt: number;
+  pendingPermissions?: { toolName: string; toolInput: any }[];
 }
 
 // ============ Events ============
@@ -93,7 +95,8 @@ export type GameEventType =
   | 'session_created'
   | 'session_message'
   | 'session_status_changed'
-  | 'session_ended';
+  | 'session_ended'
+  | 'permission_requested';
 
 export interface GameEvent {
   type: GameEventType;
