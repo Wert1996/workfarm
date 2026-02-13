@@ -8,7 +8,7 @@ import {
   getNearbyPosition,
 } from '../config';
 import { Agent, AgentState } from '../../types';
-import { AgentManager, TaskManager, ClaudeCodeBridge, eventBus } from '../../control';
+import { AgentManager, TaskManager, ClaudeCodeBridge, ElectronAdapter, eventBus } from '../../control';
 
 interface AgentSprite extends Phaser.GameObjects.Container {
   agentId: string;
@@ -38,13 +38,14 @@ export class MainScene extends Phaser.Scene {
 
   async create(): Promise<void> {
     // Initialize managers
-    this.agentManager = new AgentManager();
-    this.taskManager = new TaskManager();
+    const runtime = new ElectronAdapter();
+    this.agentManager = new AgentManager(runtime);
+    this.taskManager = new TaskManager(runtime);
 
     await this.agentManager.initialize();
     await this.taskManager.initialize();
 
-    this.claudeBridge = new ClaudeCodeBridge(this.agentManager, this.taskManager);
+    this.claudeBridge = new ClaudeCodeBridge(runtime, this.agentManager, this.taskManager);
     await this.claudeBridge.initialize();
 
     // Store for UI scene

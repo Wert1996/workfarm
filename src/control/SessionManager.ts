@@ -1,18 +1,21 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AgentSession, SessionMessage, SessionStatus, SessionMessageType } from '../types';
+import { RuntimeAdapter } from './RuntimeAdapter';
 import { eventBus } from './EventBus';
 
 export class SessionManager {
+  private runtime: RuntimeAdapter;
   private sessions: Map<string, AgentSession> = new Map();
   private agentSessionMap: Map<string, string> = new Map(); // agentId -> sessionId
   private eventCleanup: (() => void) | null = null;
 
-  constructor() {
+  constructor(runtime: RuntimeAdapter) {
+    this.runtime = runtime;
     this.setupEventListener();
   }
 
   private setupEventListener(): void {
-    this.eventCleanup = window.workfarm.onSessionEvent((data) => {
+    this.eventCleanup = this.runtime.onSessionEvent((data) => {
       this.handleStreamEvent(data.sessionId, data.event);
     });
   }
@@ -30,7 +33,8 @@ export class SessionManager {
     prompt: string,
     workingDir: string,
     systemPrompt?: string,
-    allowedTools?: string[]
+    allowedTools?: string[],
+    maxTurns?: number
   ): Promise<string> {
     const sessionId = uuidv4();
 
@@ -49,12 +53,13 @@ export class SessionManager {
 
     eventBus.emit('session_created', { sessionId, agentId, taskId });
 
-    await window.workfarm.startSession({
+    await this.runtime.startSession({
       sessionId,
       prompt,
       workingDirectory: workingDir,
       systemPrompt,
       allowedTools,
+      maxTurns,
     });
 
     session.status = 'active';
@@ -81,7 +86,7 @@ export class SessionManager {
     eventBus.emit('session_message', { sessionId, message: userMsg });
     eventBus.emit('session_status_changed', { sessionId, status: 'active' });
 
-    await window.workfarm.sendToSession({
+    await this.runtime.sendToSession({
       sessionId,
       message,
       workingDirectory: workingDir,
@@ -93,7 +98,7 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
-    await window.workfarm.stopSession(sessionId);
+    await this.runtime.stopSession(sessionId);
     this.endSession(sessionId, 'error');
   }
 
@@ -112,22 +117,27 @@ export class SessionManager {
     if (event.type === 'result') {
       const isEnd = event.subtype === 'close' || event.subtype === 'success' || event.subtype === 'error';
       if (isEnd) {
-        // Extract result text if present
+        // Extract result text only if no assistant messages were already streamed
+        // (the 'assistant' event delivers the same content during streaming).
         if (event.result) {
-          const msg = this.createMessage('assistant', typeof event.result === 'string' ? event.result : JSON.stringify(event.result));
-          session.messages.push(msg);
-          eventBus.emit('session_message', { sessionId, message: msg });
+          const hasAssistantMessages = session.messages.some(m => m.type === 'assistant');
+          if (!hasAssistantMessages) {
+            const msg = this.createMessage('assistant', typeof event.result === 'string' ? event.result : JSON.stringify(event.result));
+            session.messages.push(msg);
+            eventBus.emit('session_message', { sessionId, message: msg, agentId: session.agentId });
+          }
         }
 
         // Check for permission denials before ending session
         if (event.permission_denials && event.permission_denials.length > 0) {
-          session.pendingPermissions = event.permission_denials.map((d: any) => ({
+          const denials = event.permission_denials.map((d: any) => ({
             toolName: d.tool_name || d.toolName || 'unknown',
             toolInput: d.tool_input || d.toolInput || {},
           }));
+          session.pendingPermissions = denials;
           session.status = 'waiting_input';
           eventBus.emit('session_status_changed', { sessionId, status: 'waiting_input' });
-          for (const denial of session.pendingPermissions) {
+          for (const denial of denials) {
             eventBus.emit('permission_requested', {
               sessionId,
               agentId: session.agentId,
@@ -138,6 +148,11 @@ export class SessionManager {
           }
           return; // Don't end the session — wait for user decision
         }
+
+        // Don't end the session if it's paused waiting for permission approval —
+        // the process-close event arrives after the permission_denials result,
+        // and would otherwise tear down the session while the user is deciding.
+        if (session.status === 'waiting_input') return;
 
         const finalStatus: SessionStatus = event.subtype === 'error' ? 'error' : 'completed';
         this.endSession(sessionId, finalStatus);
@@ -253,6 +268,24 @@ export class SessionManager {
     });
   }
 
+  /**
+   * Remove one tool from pendingPermissions (case-insensitive).
+   * Returns the actual tool name from the pending permission, and whether all are now approved.
+   */
+  approvePermission(sessionId: string, toolName: string): { resolved: string; allApproved: boolean } {
+    const session = this.sessions.get(sessionId);
+    if (!session?.pendingPermissions) return { resolved: toolName, allApproved: true };
+
+    const lower = toolName.toLowerCase();
+    const match = session.pendingPermissions.find((p) => p.toolName.toLowerCase() === lower);
+    const resolved = match?.toolName || toolName;
+
+    session.pendingPermissions = session.pendingPermissions.filter(
+      (p) => p.toolName.toLowerCase() !== lower
+    );
+    return { resolved, allApproved: session.pendingPermissions.length === 0 };
+  }
+
   async resumeSession(sessionId: string, allowedTools: string[], workingDir: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -266,7 +299,7 @@ export class SessionManager {
 
     eventBus.emit('session_status_changed', { sessionId, status: 'active' });
 
-    await window.workfarm.sendToSession({
+    await this.runtime.sendToSession({
       sessionId,
       message: 'Permission granted. Continue your task.',
       workingDirectory: workingDir,

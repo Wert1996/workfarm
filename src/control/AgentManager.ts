@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Agent, AgentState, AgentMemory } from '../types';
-import { COLORS, getRandomPosition } from '../game/config';
+import { AGENT_COLORS, getRandomPosition } from './agentConfig';
+import { RuntimeAdapter } from './RuntimeAdapter';
 import { eventBus } from './EventBus';
 
 const BASELINE_TOOLS = ['Read', 'Glob', 'Grep'];
@@ -13,17 +14,26 @@ const AGENT_NAMES = [
 ];
 
 export class AgentManager {
+  private runtime: RuntimeAdapter;
   private agents: Map<string, Agent> = new Map();
   private agentMemories: Map<string, AgentMemory> = new Map();
   private usedNames: Set<string> = new Set();
   private colorIndex: number = 0;
 
+  constructor(runtime: RuntimeAdapter) {
+    this.runtime = runtime;
+  }
+
   async initialize(): Promise<void> {
-    const savedAgents = await window.workfarm.loadAgents();
+    const savedAgents = await this.runtime.loadAgents();
     for (const agent of savedAgents) {
       // Backfill approvedTools for agents loaded from disk that don't have it
       if (!agent.approvedTools) {
         agent.approvedTools = [...BASELINE_TOOLS];
+      }
+      // Backfill systemPrompt
+      if (agent.systemPrompt === undefined) {
+        agent.systemPrompt = undefined;
       }
       this.agents.set(agent.id, agent);
       this.usedNames.add(agent.name);
@@ -31,17 +41,17 @@ export class AgentManager {
 
     // Load memories
     for (const agent of this.agents.values()) {
-      const memory = await window.workfarm.loadAgentMemory(agent.id);
+      const memory = await this.runtime.loadAgentMemory(agent.id);
       this.agentMemories.set(agent.id, memory);
     }
   }
 
   async save(): Promise<void> {
     const agents = Array.from(this.agents.values());
-    await window.workfarm.saveAgents(agents);
+    await this.runtime.saveAgents(agents);
 
     for (const [agentId, memory] of this.agentMemories) {
-      await window.workfarm.saveAgentMemory(agentId, memory);
+      await this.runtime.saveAgentMemory(agentId, memory);
     }
   }
 
@@ -70,7 +80,7 @@ export class AgentManager {
   }
 
   private pickColor(): number {
-    const color = COLORS.agentColors[this.colorIndex % COLORS.agentColors.length];
+    const color = AGENT_COLORS[this.colorIndex % AGENT_COLORS.length];
     this.colorIndex++;
     return color;
   }
@@ -176,6 +186,13 @@ export class AgentManager {
     const agent = this.agents.get(agentId);
     if (!agent) return;
     agent.tasksCompleted++;
+  }
+
+  setSystemPrompt(agentId: string, prompt: string | undefined): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.systemPrompt = prompt;
+    this.save();
   }
 
   // Tool permission management

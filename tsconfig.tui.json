@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "outDir": "./dist/tui",
+    "rootDir": "./src",
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": [
+    "src/control/**/*",
+    "src/types/**/*",
+    "src/tui/**/*",
+    "src/observe/**/*"
+  ],
+  "exclude": [
+    "node_modules", "dist",
+    "src/game/**/*", "src/main.ts",
+    "src/control/ElectronAdapter.ts",
+    "src/control/index.ts"
+  ]
+}

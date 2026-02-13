@@ -1,12 +1,18 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Task, TaskStatus } from '../types';
+import { RuntimeAdapter } from './RuntimeAdapter';
 import { eventBus } from './EventBus';
 
 export class TaskManager {
+  private runtime: RuntimeAdapter;
   private tasks: Map<string, Task> = new Map();
 
+  constructor(runtime: RuntimeAdapter) {
+    this.runtime = runtime;
+  }
+
   async initialize(): Promise<void> {
-    const savedTasks = await window.workfarm.loadTasks();
+    const savedTasks = await this.runtime.loadTasks();
     for (const task of savedTasks) {
       this.tasks.set(task.id, task);
     }
@@ -14,7 +20,7 @@ export class TaskManager {
 
   async save(): Promise<void> {
     const tasks = Array.from(this.tasks.values());
-    await window.workfarm.saveTasks(tasks);
+    await this.runtime.saveTasks(tasks);
   }
 
   getTask(id: string): Task | undefined {

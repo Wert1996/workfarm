@@ -13,6 +13,7 @@ export interface Agent {
   hiredAt: number;
   tasksCompleted: number;
   approvedTools: string[];
+  systemPrompt?: string;  // Custom persona/instructions
   // Position tracking for wandering
   gridX: number;
   gridY: number;
@@ -79,6 +80,10 @@ export interface AgentSession {
   pendingPermissions?: { toolName: string; toolInput: any }[];
 }
 
+// ============ Goals ============
+
+export * from './goals';
+
 // ============ Events ============
 
 export type GameEventType =
@@ -96,7 +101,20 @@ export type GameEventType =
   | 'session_message'
   | 'session_status_changed'
   | 'session_ended'
-  | 'permission_requested';
+  | 'permission_requested'
+  | 'goal_created'
+  | 'goal_updated'
+  | 'goal_paused'
+  | 'goal_resumed'
+  | 'plan_created'
+  | 'plan_updated'
+  | 'step_started'
+  | 'step_completed'
+  | 'step_failed'
+  | 'trigger_fired'
+  | 'conversation_started'
+  | 'question_raised'
+  | 'preference_extracted';
 
 export interface GameEvent {
   type: GameEventType;

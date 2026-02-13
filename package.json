@@ -9,6 +9,8 @@
     "dev:electron": "wait-on http://localhost:5173 && NODE_ENV=development electron .",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "build:electron": "tsc -p tsconfig.electron.json",
+    "build:tui": "tsc -p tsconfig.tui.json",
+    "tui": "npm run build:tui && node dist/tui/tui/index.js",
     "start": "npm run build && electron .",
     "package": "npm run build && electron-builder"
   },

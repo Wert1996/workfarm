@@ -1,20 +1,14 @@
-import { Agent, Task } from '../types';
+import { Agent, Task, AgentGoal, AgentPlan, PlanStep } from '../types';
+import { RuntimeAdapter } from './RuntimeAdapter';
 import { AgentManager } from './AgentManager';
 import { TaskManager } from './TaskManager';
 import { SessionManager } from './SessionManager';
 import { eventBus } from './EventBus';
 
-interface ClaudeExecuteResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  parsed?: any;
-  error?: string;
-}
-
 const FIND_SKILLS_SUMMARY = `You have access to the "find-skills" skill. When users ask about capabilities or how to do something, you can search for installable skills using: npx skills find [query]. Install with: npx skills add <package> -g -y. Browse at https://skills.sh/`;
 
 export class ClaudeCodeBridge {
+  private runtime: RuntimeAdapter;
   private agentManager: AgentManager;
   private taskManager: TaskManager;
   private sessionManager: SessionManager;
@@ -22,16 +16,17 @@ export class ClaudeCodeBridge {
   private activeExecutions: Map<string, boolean> = new Map();
   private progressCleanup: (() => void) | null = null;
 
-  constructor(agentManager: AgentManager, taskManager: TaskManager) {
+  constructor(runtime: RuntimeAdapter, agentManager: AgentManager, taskManager: TaskManager) {
+    this.runtime = runtime;
     this.agentManager = agentManager;
     this.taskManager = taskManager;
-    this.sessionManager = new SessionManager();
+    this.sessionManager = new SessionManager(runtime);
     this.setupProgressListener();
     this.setupSessionListeners();
   }
 
   private setupProgressListener(): void {
-    this.progressCleanup = window.workfarm.onClaudeCodeProgress((data) => {
+    this.progressCleanup = this.runtime.onClaudeCodeProgress((data) => {
       eventBus.emit('claude_progress', data);
     });
   }
@@ -87,7 +82,7 @@ export class ClaudeCodeBridge {
   }
 
   async initialize(): Promise<void> {
-    this.workingDirectory = await window.workfarm.getWorkingDirectory();
+    this.workingDirectory = await this.runtime.getWorkingDirectory();
 
     // Clear any stale execution state from agents that were mid-task when app closed
     this.activeExecutions.clear();
@@ -110,7 +105,7 @@ export class ClaudeCodeBridge {
   }
 
   async selectWorkingDirectory(): Promise<string | null> {
-    const dir = await window.workfarm.selectDirectory();
+    const dir = await this.runtime.selectDirectory();
     if (dir) {
       this.workingDirectory = dir;
       // Ensure skills are installed in the new project directory
@@ -130,7 +125,7 @@ export class ClaudeCodeBridge {
   private async ensureSkills(): Promise<void> {
     if (!this.workingDirectory) return;
     try {
-      await window.workfarm.ensureSkills(this.workingDirectory);
+      await this.runtime.ensureSkills(this.workingDirectory);
     } catch (error) {
       console.error('Failed to ensure skills:', error);
     }
@@ -157,7 +152,7 @@ export class ClaudeCodeBridge {
     return parts.join('\n');
   }
 
-  async executeTask(agentId: string, taskId: string): Promise<{
+  async executeTask(agentId: string, taskId: string, maxTurns?: number): Promise<{
     success: boolean;
     response: string;
     error?: string;
@@ -194,13 +189,17 @@ export class ClaudeCodeBridge {
 
       console.log('[executeTask] step 4: starting session');
       // Start an interactive session instead of one-shot execution
+      const systemPrompt = agent.systemPrompt
+        ? `${agent.systemPrompt}\n\n${FIND_SKILLS_SUMMARY}`
+        : FIND_SKILLS_SUMMARY;
       await this.sessionManager.startSession(
         agentId,
         taskId,
         prompt,
         this.workingDirectory,
-        FIND_SKILLS_SUMMARY,
-        agent.approvedTools
+        systemPrompt,
+        agent.approvedTools,
+        maxTurns
       );
 
       console.log('[executeTask] step 5: session started');
@@ -230,14 +229,21 @@ export class ClaudeCodeBridge {
   }
 
   async approveToolPermission(agentId: string, toolName: string): Promise<void> {
-    this.agentManager.addApprovedTool(agentId, toolName);
     const session = this.sessionManager.getActiveSessionForAgent(agentId);
     if (session) {
-      await this.sessionManager.resumeSession(
-        session.id,
-        this.agentManager.getApprovedTools(agentId),
-        this.workingDirectory
-      );
+      // Resolve the correctly-cased tool name from pending permissions
+      const { resolved, allApproved } = this.sessionManager.approvePermission(session.id, toolName);
+      this.agentManager.addApprovedTool(agentId, resolved);
+      if (allApproved) {
+        await this.sessionManager.resumeSession(
+          session.id,
+          this.agentManager.getApprovedTools(agentId),
+          this.workingDirectory
+        );
+      }
+    } else {
+      // No active session — just store the tool for future use
+      this.agentManager.addApprovedTool(agentId, toolName);
     }
   }
 
@@ -260,7 +266,7 @@ export class ClaudeCodeBridge {
     }
 
     // Fall back to legacy cancellation
-    const result = await window.workfarm.claudeCodeCancel(agentId);
+    const result = await this.runtime.claudeCodeCancel(agentId);
     if (result.success) {
       this.activeExecutions.delete(agentId);
       this.agentManager.updateAgentState(agentId, 'idle');
@@ -270,5 +276,141 @@ export class ClaudeCodeBridge {
 
   isExecuting(agentId: string): boolean {
     return this.activeExecutions.get(agentId) || false;
+  }
+
+  // --- Goal-aware prompt builders ---
+
+  buildGoalPrompt(agent: Agent, goal: AgentGoal, plan: AgentPlan, step: PlanStep, preferenceContext?: string): string {
+    const parts: string[] = [];
+
+    parts.push(`You are ${agent.name}.`);
+    if (goal.systemPrompt) {
+      parts.push(goal.systemPrompt);
+    }
+
+    parts.push(`\nYou are working toward the goal: "${goal.description}"`);
+
+    if (goal.constraints.length > 0) {
+      parts.push(`\nConstraints:\n${goal.constraints.map(c => `- ${c}`).join('\n')}`);
+    }
+
+    if (preferenceContext) {
+      parts.push(`\n${preferenceContext}`);
+    }
+
+    parts.push(`\nPlan (v${plan.version}):`);
+    for (const s of plan.steps) {
+      const marker = s.id === step.id ? '>>>' : '   ';
+      const statusIcon = s.status === 'completed' ? '[done]' : s.status === 'failed' ? '[fail]' : s.status === 'in_progress' ? '[...]' : '[   ]';
+      parts.push(`${marker} ${statusIcon} Step ${s.order + 1}: ${s.description}`);
+      if (s.result && s.id !== step.id) {
+        parts.push(`       Result: ${s.result.substring(0, 200)}`);
+      }
+    }
+
+    parts.push(`\nYour current task: Step ${step.order + 1}: ${step.description}`);
+    parts.push(`\nComplete this step. Be concise and effective.`);
+    parts.push(`\nIMPORTANT: Before asking the user a question, check if your known preferences already answer it. If so, decide autonomously and note "[Used preference: <key>]" in your response.`);
+    parts.push(`If you encounter genuine uncertainty, a judgment call, or conflicting approaches with no matching preference — do NOT guess. End your response with "[NEEDS_INPUT]: your question here" and stop working.`);
+
+    return parts.join('\n');
+  }
+
+  buildPlanningPrompt(
+    agent: Agent,
+    goal: AgentGoal,
+    previousResults?: { step: string; result: string }[],
+    preferenceContext?: string,
+    cycleNumber?: number
+  ): string {
+    const parts: string[] = [];
+
+    parts.push(`You are ${agent.name}, a planning assistant.`);
+    parts.push(`\nYou have the goal: "${goal.description}"`);
+
+    if (goal.constraints.length > 0) {
+      parts.push(`\nConstraints:\n${goal.constraints.map(c => `- ${c}`).join('\n')}`);
+    }
+
+    if (preferenceContext) {
+      parts.push(`\n${preferenceContext}`);
+    }
+
+    if (previousResults && previousResults.length > 0) {
+      parts.push(`\nPrevious results${cycleNumber ? ` (cycle ${cycleNumber})` : ''}:`);
+      for (const pr of previousResults) {
+        parts.push(`- ${pr.step}: ${pr.result.substring(0, 200)}`);
+      }
+    }
+
+    parts.push(`\nCreate a plan to achieve this goal. Output ONLY a JSON object with this format:`);
+    parts.push(`{`);
+    parts.push(`  "reasoning": "why this plan",`);
+    parts.push(`  "recurring": true/false,`);
+    parts.push(`  "interval_minutes": number or null,`);
+    parts.push(`  "cycle_goal": "what this cycle should accomplish" or null,`);
+    parts.push(`  "completion_criteria": "when to stop cycling entirely" or null,`);
+    parts.push(`  "steps": [{"description": "step description"}, ...]`);
+    parts.push(`}`);
+    parts.push(`\nSet "recurring": true if this goal needs ongoing cycles (monitoring, maintenance, continuous improvement).`);
+    parts.push(`Set "recurring": false if this is a one-time task with a clear end state.`);
+    parts.push(`If recurring, suggest an interval_minutes for how often to re-check, and completion_criteria for when to stop.`);
+    parts.push(`\nKeep steps concrete and actionable. Output valid JSON only, no markdown fences.`);
+
+    return parts.join('\n');
+  }
+
+  async startConversation(
+    agentId: string,
+    message: string,
+    context: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const agent = this.agentManager.getAgent(agentId);
+    if (!agent) return { success: false, error: 'Agent not found' };
+
+    // If agent has an active session, send to it
+    const activeSession = this.sessionManager.getActiveSessionForAgent(agentId);
+    if (activeSession) {
+      try {
+        await this.sessionManager.sendMessage(activeSession.id, message, this.workingDirectory);
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    }
+
+    // Start a new conversation session (no task)
+    const conversationTaskId = 'conversation';
+    const systemPrompt = agent.systemPrompt
+      ? `${agent.systemPrompt}\n\n${context}`
+      : context;
+
+    eventBus.emit('conversation_started', { agentId, message });
+
+    try {
+      await this.sessionManager.startSession(
+        agentId,
+        conversationTaskId,
+        message,
+        this.workingDirectory,
+        systemPrompt,
+        agent.approvedTools
+      );
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
+  async continueConversation(agentId: string, message: string): Promise<{ success: boolean; error?: string }> {
+    const session = this.sessionManager.getActiveSessionForAgent(agentId);
+    if (!session) return { success: false, error: 'No active session for this agent' };
+
+    try {
+      await this.sessionManager.sendMessage(session.id, message, this.workingDirectory);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
   }
 }

@@ -285,7 +285,13 @@ function spawnSessionProcess(
   let lineBuffer = '';
   let hasErrored = false;
 
+  // When a session is resumed, a new process replaces this one in the map.
+  // The old process's handlers must bail out to avoid sending stale close/error
+  // events that would prematurely end the session.
+  const isSuperseded = () => sessionProcesses.get(sessionId) !== claude;
+
   claude.stdout.on('data', (data: Buffer) => {
+    if (isSuperseded()) return;
     console.log('[workfarm] stdout chunk:', data.toString().substring(0, 200));
     lineBuffer += data.toString();
     const lines = lineBuffer.split('\n');
@@ -312,6 +318,7 @@ function spawnSessionProcess(
   });
 
   claude.stderr.on('data', (data: Buffer) => {
+    if (isSuperseded()) return;
     const chunk = data.toString();
     console.log('[workfarm] stderr:', chunk);
     mainWindow?.webContents.send('claude-session-event', {
@@ -322,6 +329,8 @@ function spawnSessionProcess(
 
   claude.on('close', (code: number | null) => {
     console.log('[workfarm] Process closed with code:', code);
+    // Skip events from a superseded process (replaced by session resume)
+    if (isSuperseded()) return;
     // Skip if already handled by error event
     if (hasErrored) return;
 
@@ -348,6 +357,7 @@ function spawnSessionProcess(
 
   claude.on('error', (error: Error) => {
     console.error('[workfarm] Spawn error:', error.message);
+    if (isSuperseded()) return;
     hasErrored = true;
     sessionProcesses.delete(sessionId);
     mainWindow?.webContents.send('claude-session-event', {
@@ -373,10 +383,12 @@ ipcMain.handle('claude-session-start', async (_event, options: {
   }
 
   if (allowedTools && allowedTools.length > 0) {
-    args.push('--allowedTools', ...allowedTools);
+    args.push('--allowedTools', allowedTools.join(','));
   }
 
-  args.push(prompt);
+  // Use '--' to separate flags from the positional prompt argument,
+  // ensuring the prompt is never consumed as a flag value.
+  args.push('--', prompt);
 
   console.log('[workfarm] Spawning claude session:', claudePath, args.map((a, i) => i < args.length - 1 ? a : a.substring(0, 80) + '...').join(' '));
   console.log('[workfarm] Working directory:', workingDirectory);
@@ -403,10 +415,10 @@ ipcMain.handle('claude-session-send', async (_event, options: {
   const args = ['--print', '--verbose', '--resume', sessionId, '--output-format', 'stream-json', '--include-partial-messages'];
 
   if (allowedTools && allowedTools.length > 0) {
-    args.push('--allowedTools', ...allowedTools);
+    args.push('--allowedTools', allowedTools.join(','));
   }
 
-  args.push(message);
+  args.push('--', message);
 
   spawnSessionProcess(sessionId, args, workingDirectory);
   return { success: true };
