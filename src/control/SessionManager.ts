@@ -34,7 +34,8 @@ export class SessionManager {
     workingDir: string,
     systemPrompt?: string,
     allowedTools?: string[],
-    maxTurns?: number
+    maxTurns?: number,
+    additionalDirs?: string[]
   ): Promise<string> {
     const sessionId = uuidv4();
 
@@ -60,6 +61,8 @@ export class SessionManager {
       systemPrompt,
       allowedTools,
       maxTurns,
+      agentId,
+      additionalDirs,
     });
 
     session.status = 'active';
@@ -91,6 +94,7 @@ export class SessionManager {
       message,
       workingDirectory: workingDir,
       allowedTools,
+      agentId: session.agentId,
     });
   }
 
@@ -103,7 +107,8 @@ export class SessionManager {
   }
 
   private handleStreamEvent(sessionId: string, event: any): void {
-    console.log('[SessionManager] event received:', sessionId.substring(0, 8), event.type, event.subtype || '');
+    // Debug: uncomment to trace raw stream events
+    // console.log('[SessionManager] event received:', sessionId.substring(0, 8), event.type, event.subtype || '');
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.warn('[SessionManager] no session found for:', sessionId.substring(0, 8));
@@ -304,6 +309,7 @@ export class SessionManager {
       message: 'Permission granted. Continue your task.',
       workingDirectory: workingDir,
       allowedTools,
+      agentId: session.agentId,
     });
   }
 

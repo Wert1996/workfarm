@@ -13,6 +13,8 @@ export class NodeAdapter implements RuntimeAdapter {
   private memoryDir: string;
   private logsDir: string;
   private preferencesDir: string;
+  private claudeHomesDir: string;
+  private configFile: string;
   private claudePath: string = 'claude';
   private workingDirectory: string;
 
@@ -30,6 +32,8 @@ export class NodeAdapter implements RuntimeAdapter {
     this.memoryDir = path.join(this.dataDir, 'memory');
     this.logsDir = path.join(this.dataDir, 'logs');
     this.preferencesDir = path.join(this.dataDir, 'preferences');
+    this.claudeHomesDir = path.join(this.dataDir, 'claude-homes');
+    this.configFile = path.join(this.dataDir, 'config.json');
 
     this.ensureDataDir();
     this.resolveClaudePath();
@@ -40,6 +44,7 @@ export class NodeAdapter implements RuntimeAdapter {
     fs.mkdirSync(this.memoryDir, { recursive: true });
     fs.mkdirSync(this.logsDir, { recursive: true });
     fs.mkdirSync(this.preferencesDir, { recursive: true });
+    fs.mkdirSync(this.claudeHomesDir, { recursive: true });
   }
 
   private resolveClaudePath(): void {
@@ -168,6 +173,26 @@ export class NodeAdapter implements RuntimeAdapter {
     }
   }
 
+  // --- Config ---
+
+  async loadConfig(): Promise<Record<string, any>> {
+    try {
+      if (fs.existsSync(this.configFile)) {
+        return JSON.parse(fs.readFileSync(this.configFile, 'utf-8'));
+      }
+      return {};
+    } catch { return {}; }
+  }
+
+  async saveConfig(config: Record<string, any>): Promise<{ success: boolean; error?: string }> {
+    try {
+      fs.writeFileSync(this.configFile, JSON.stringify(config, null, 2));
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+
   // --- Observability logs ---
 
   async appendLog(agentId: string, event: any): Promise<void> {
@@ -196,14 +221,17 @@ export class NodeAdapter implements RuntimeAdapter {
     systemPrompt?: string;
     allowedTools?: string[];
     maxTurns?: number;
+    agentId?: string;
+    additionalDirs?: string[];
   }): Promise<{ success: boolean; sessionId: string }> {
-    const { sessionId, prompt, workingDirectory, systemPrompt, allowedTools, maxTurns } = options;
+    const { sessionId, prompt, workingDirectory, systemPrompt, allowedTools, maxTurns, agentId, additionalDirs } = options;
 
     const args = [
       '--print', '--verbose',
       '--output-format', 'stream-json',
       '--include-partial-messages',
       '--session-id', sessionId,
+      '--setting-sources', 'user',
     ];
 
     if (systemPrompt) {
@@ -215,9 +243,12 @@ export class NodeAdapter implements RuntimeAdapter {
     if (maxTurns && maxTurns > 0) {
       args.push('--max-turns', String(maxTurns));
     }
+    if (additionalDirs && additionalDirs.length > 0) {
+      args.push('--add-dir', ...additionalDirs);
+    }
     args.push('--', prompt);
 
-    this.spawnSessionProcess(sessionId, args, workingDirectory);
+    this.spawnSessionProcess(sessionId, args, workingDirectory, agentId);
     return { success: true, sessionId };
   }
 
@@ -226,8 +257,9 @@ export class NodeAdapter implements RuntimeAdapter {
     message: string;
     workingDirectory: string;
     allowedTools?: string[];
+    agentId?: string;
   }): Promise<{ success: boolean }> {
-    const { sessionId, message, workingDirectory, allowedTools } = options;
+    const { sessionId, message, workingDirectory, allowedTools, agentId } = options;
 
     // Kill existing process for this session if still running
     const existing = this.sessionProcesses.get(sessionId);
@@ -248,7 +280,7 @@ export class NodeAdapter implements RuntimeAdapter {
     }
     args.push('--', message);
 
-    this.spawnSessionProcess(sessionId, args, workingDirectory);
+    this.spawnSessionProcess(sessionId, args, workingDirectory, agentId);
     return { success: true };
   }
 
@@ -323,7 +355,8 @@ export class NodeAdapter implements RuntimeAdapter {
 
   // --- Process management (ported from electron/main.ts) ---
 
-  private spawnSessionProcess(sessionId: string, args: string[], workingDirectory: string): void {
+  private spawnSessionProcess(sessionId: string, args: string[], workingDirectory: string, _agentId?: string): void {
+
     const claude = spawn(this.claudePath, args, {
       cwd: workingDirectory,
       env: { ...process.env },

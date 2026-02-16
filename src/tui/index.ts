@@ -12,12 +12,59 @@ import { PreferenceManager } from '../control/PreferenceManager';
 import { ObservabilityModule } from '../observe/ObservabilityModule';
 import { eventBus } from '../control/EventBus';
 
+async function promptForWorkspaceRoots(rl: readline.Interface): Promise<string[]> {
+  const roots: string[] = [];
+  console.log(`\n  First-run setup: which directories should your agents have access to?`);
+  console.log(`  Enter directory paths (one per line). Empty line to finish.\n`);
+
+  return new Promise((resolve) => {
+    function ask() {
+      rl.question('  path> ', (line) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          if (roots.length === 0) {
+            console.log('  At least one workspace root is required.');
+            ask();
+          } else {
+            resolve(roots);
+          }
+          return;
+        }
+        roots.push(trimmed);
+        console.log(`  Added: ${trimmed}`);
+        ask();
+      });
+    }
+    ask();
+  });
+}
+
 async function main() {
-  const workingDirectory = process.argv[2] || process.cwd();
-  console.log(`\n  Work Farm TUI`);
-  console.log(`  project: ${workingDirectory}\n`);
+  const home = process.env.HOME || process.env.USERPROFILE || process.cwd();
+  const workingDirectory = process.argv[2] || home;
 
   const runtime = new NodeAdapter({ workingDirectory });
+
+  // Load config and check for first-run setup
+  const config = await runtime.loadConfig();
+
+  const setupRl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  if (!config.workspaceRoots || config.workspaceRoots.length === 0) {
+    config.workspaceRoots = await promptForWorkspaceRoots(setupRl);
+    await runtime.saveConfig(config);
+    console.log(`\n  Saved ${config.workspaceRoots.length} workspace root(s).`);
+  }
+  setupRl.close();
+
+  const workspaceRoots: string[] = config.workspaceRoots;
+
+  console.log(`\n  Work Farm TUI`);
+  console.log(`  workspaces: ${workspaceRoots.join(', ')}\n`);
+
   const agentManager = new AgentManager(runtime);
   const taskManager = new TaskManager(runtime);
   const goalManager = new GoalManager(runtime);
@@ -28,6 +75,7 @@ async function main() {
 
   const bridge = new ClaudeCodeBridge(runtime, agentManager, taskManager);
   await bridge.initialize();
+  bridge.setWorkspaceRoots(workspaceRoots);
 
   const preferenceManager = new PreferenceManager(runtime);
   // Load preferences for all existing agents
@@ -144,8 +192,32 @@ async function main() {
       case 'fire': {
         const agent = findAgent(parts[1]);
         if (!agent) break;
+
+        // Cancel any active execution
+        await bridge.cancelExecution(agent.id);
+
+        // Delete tasks belonging to this agent
+        const agentTasks = taskManager.getTasksByAgent(agent.id);
+        for (const t of agentTasks) {
+          taskManager.deleteTask(t.id);
+        }
+
+        // Delete goals, plans, and triggers for this agent
+        const agentGoals = goalManager.getGoalsForAgent(agent.id);
+        for (const g of agentGoals) {
+          const triggers = goalManager.getTriggersForGoal(g.id);
+          for (const tr of triggers) {
+            triggerScheduler.removeTrigger(tr.id);
+            goalManager.removeTrigger(tr.id);
+          }
+          goalManager.deleteGoal(g.id);
+        }
+
+        // Clear preferences
+        preferenceManager.clearPreferences(agent.id);
+
         agentManager.fireAgent(agent.id);
-        console.log(`  Fired ${agent.name}`);
+        console.log(`  Fired ${agent.name} (cleaned up ${agentTasks.length} tasks, ${agentGoals.length} goals)`);
         break;
       }
 
@@ -233,15 +305,24 @@ async function main() {
 
       case 'goal': {
         const agentName = parts[1];
-        const desc = parts.slice(2).join(' ');
+        const remaining = parts.slice(2);
+        // Parse optional --dir <path> flag
+        let goalWorkDir: string | undefined;
+        const dirIdx = remaining.indexOf('--dir');
+        if (dirIdx >= 0 && remaining[dirIdx + 1]) {
+          goalWorkDir = remaining[dirIdx + 1];
+          remaining.splice(dirIdx, 2);
+        }
+        const desc = remaining.join(' ');
         if (!agentName || !desc) {
-          console.log('  Usage: goal <agent> <description>');
+          console.log('  Usage: goal <agent> [--dir <path>] <description>');
           break;
         }
         const agent = findAgent(agentName);
         if (!agent) break;
-        const goal = goalManager.createGoal(agent.id, desc);
+        const goal = goalManager.createGoal(agent.id, desc, { workingDirectory: goalWorkDir });
         console.log(`  Goal created for ${agent.name}: ${goal.description}`);
+        if (goalWorkDir) console.log(`  Working directory: ${goalWorkDir}`);
         console.log(`  Goal ID: ${goal.id.substring(0, 8)}`);
         break;
       }
@@ -264,8 +345,28 @@ async function main() {
           const agent = agentManager.getAgent(g.agentId);
           const plan = goalManager.getCurrentPlan(g.id);
           const planStr = plan ? `  plan: v${plan.version} (${plan.steps.length} steps)` : '';
-          console.log(`  [${g.status}] ${agent?.name || '?'}: ${g.description.substring(0, 50)}${planStr}`);
+          const dirStr = g.workingDirectory ? `  dir: ${g.workingDirectory}` : '';
+          console.log(`  [${g.status}] ${agent?.name || '?'}: ${g.description.substring(0, 50)}${planStr}${dirStr}`);
         }
+        break;
+      }
+
+      case 'chdir': {
+        const agentName = parts[1];
+        const dirPath = parts[2];
+        if (!agentName || !dirPath) {
+          console.log('  Usage: chdir <agent> <path>');
+          break;
+        }
+        const agent = findAgent(agentName);
+        if (!agent) break;
+        const goal = goalManager.getActiveGoal(agent.id);
+        if (!goal) {
+          console.log(`  ${agent.name} has no active goal.`);
+          break;
+        }
+        goalManager.updateGoal(goal.id, { workingDirectory: dirPath });
+        console.log(`  ${agent.name}'s goal now targets: ${dirPath}`);
         break;
       }
 
@@ -553,6 +654,47 @@ async function main() {
         break;
       }
 
+      case 'workspace':
+      case 'workspaces': {
+        const action = parts[1];
+        if (action === 'add' && parts[2]) {
+          const dir = parts[2];
+          if (!workspaceRoots.includes(dir)) {
+            workspaceRoots.push(dir);
+            config.workspaceRoots = workspaceRoots;
+            await runtime.saveConfig(config);
+            bridge.setWorkspaceRoots(workspaceRoots);
+            console.log(`  Added workspace root: ${dir}`);
+          } else {
+            console.log(`  Already registered: ${dir}`);
+          }
+        } else if (action === 'remove' && parts[2]) {
+          const dir = parts[2];
+          const idx = workspaceRoots.indexOf(dir);
+          if (idx >= 0) {
+            workspaceRoots.splice(idx, 1);
+            config.workspaceRoots = workspaceRoots;
+            await runtime.saveConfig(config);
+            bridge.setWorkspaceRoots(workspaceRoots);
+            console.log(`  Removed workspace root: ${dir}`);
+          } else {
+            console.log(`  Not found: ${dir}`);
+          }
+        } else if (!action || action === 'list') {
+          if (workspaceRoots.length === 0) {
+            console.log('  No workspace roots configured.');
+          } else {
+            console.log('  Workspace roots:');
+            for (const r of workspaceRoots) {
+              console.log(`    - ${r}`);
+            }
+          }
+        } else {
+          console.log('  Usage: workspace [add <path> | remove <path> | list]');
+        }
+        break;
+      }
+
       case 'help': {
         console.log('  Commands:');
         console.log('    hire [name]                   Hire an agent');
@@ -563,8 +705,9 @@ async function main() {
         console.log('    deny <agent>                  Deny pending permissions');
         console.log('    tasks                         List all tasks');
         console.log();
-        console.log('    goal <agent> <description>    Create a goal for an agent');
+        console.log('    goal <agent> [--dir <path>] <desc>  Create a goal (optionally in a different codebase)');
         console.log('    goals [agent]                 List goals');
+        console.log('    chdir <agent> <path>          Set working directory for active goal');
         console.log('    constrain <agent> <text>      Add constraint to active goal');
         console.log('    plan <agent>                  Show current plan');
         console.log('    wake <agent>                  Trigger goal execution');
@@ -577,6 +720,10 @@ async function main() {
         console.log('    forget <agent> <key>          Remove a preference');
         console.log('    schedule <agent> <minutes>    Set interval trigger');
         console.log('    unschedule <agent>            Remove triggers');
+        console.log();
+        console.log('    workspace                     List workspace roots');
+        console.log('    workspace add <path>          Add a workspace root');
+        console.log('    workspace remove <path>       Remove a workspace root');
         console.log();
         console.log('    quit                          Exit');
         break;

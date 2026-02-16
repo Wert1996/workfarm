@@ -13,6 +13,7 @@ export class ClaudeCodeBridge {
   private taskManager: TaskManager;
   private sessionManager: SessionManager;
   private workingDirectory: string = '';
+  private workspaceRoots: string[] = [];
   private activeExecutions: Map<string, boolean> = new Map();
   private progressCleanup: (() => void) | null = null;
 
@@ -118,6 +119,14 @@ export class ClaudeCodeBridge {
     return this.workingDirectory;
   }
 
+  setWorkspaceRoots(roots: string[]): void {
+    this.workspaceRoots = roots;
+  }
+
+  getWorkspaceRoots(): string[] {
+    return this.workspaceRoots;
+  }
+
   getSessionManager(): SessionManager {
     return this.sessionManager;
   }
@@ -152,7 +161,7 @@ export class ClaudeCodeBridge {
     return parts.join('\n');
   }
 
-  async executeTask(agentId: string, taskId: string, maxTurns?: number): Promise<{
+  async executeTask(agentId: string, taskId: string, maxTurns?: number, workingDirectory?: string): Promise<{
     success: boolean;
     response: string;
     error?: string;
@@ -180,7 +189,8 @@ export class ClaudeCodeBridge {
       this.taskManager.startTask(taskId);
       this.taskManager.addLog(taskId, `${agent.name} started working`);
 
-      console.log('[executeTask] step 2: ensuring skills, workingDir:', this.workingDirectory);
+      const effectiveDir = workingDirectory || this.workingDirectory;
+      console.log('[executeTask] step 2: ensuring skills, workingDir:', effectiveDir);
       // Ensure skills before starting
       await this.ensureSkills();
 
@@ -196,10 +206,11 @@ export class ClaudeCodeBridge {
         agentId,
         taskId,
         prompt,
-        this.workingDirectory,
+        effectiveDir,
         systemPrompt,
         agent.approvedTools,
-        maxTurns
+        maxTurns,
+        this.workspaceRoots
       );
 
       console.log('[executeTask] step 5: session started');
@@ -283,12 +294,19 @@ export class ClaudeCodeBridge {
   buildGoalPrompt(agent: Agent, goal: AgentGoal, plan: AgentPlan, step: PlanStep, preferenceContext?: string): string {
     const parts: string[] = [];
 
-    parts.push(`You are ${agent.name}.`);
+    parts.push(`You are ${agent.name}, an autonomous agent managed by the workfarm system.`);
+    parts.push(`IMPORTANT: You are operating under a STRICT GOAL assigned by your manager. Do not infer, rename, or reinterpret the goal. Follow it exactly as stated.`);
     if (goal.systemPrompt) {
-      parts.push(goal.systemPrompt);
+      parts.push(`\n${goal.systemPrompt}`);
     }
 
-    parts.push(`\nYou are working toward the goal: "${goal.description}"`);
+    parts.push(`\n=== YOUR ASSIGNED GOAL (do not modify) ===`);
+    parts.push(`"${goal.description}"`);
+    parts.push(`Working directory: ${goal.workingDirectory || this.workingDirectory}`);
+    if (this.workspaceRoots.length > 0) {
+      parts.push(`Workspace roots (you have access to these):\n${this.workspaceRoots.map(r => `  - ${r}`).join('\n')}`);
+    }
+    parts.push(`===========================================`);
 
     if (goal.constraints.length > 0) {
       parts.push(`\nConstraints:\n${goal.constraints.map(c => `- ${c}`).join('\n')}`);
@@ -309,8 +327,8 @@ export class ClaudeCodeBridge {
     }
 
     parts.push(`\nYour current task: Step ${step.order + 1}: ${step.description}`);
-    parts.push(`\nComplete this step. Be concise and effective.`);
-    parts.push(`\nIMPORTANT: Before asking the user a question, check if your known preferences already answer it. If so, decide autonomously and note "[Used preference: <key>]" in your response.`);
+    parts.push(`\nComplete this step. Be concise and effective. Stay within the scope of your assigned goal.`);
+    parts.push(`\nBefore asking the user a question, check if your known preferences already answer it. If so, decide autonomously and note "[Used preference: <key>]" in your response.`);
     parts.push(`If you encounter genuine uncertainty, a judgment call, or conflicting approaches with no matching preference — do NOT guess. End your response with "[NEEDS_INPUT]: your question here" and stop working.`);
 
     return parts.join('\n');
@@ -325,8 +343,16 @@ export class ClaudeCodeBridge {
   ): string {
     const parts: string[] = [];
 
-    parts.push(`You are ${agent.name}, a planning assistant.`);
-    parts.push(`\nYou have the goal: "${goal.description}"`);
+    parts.push(`You are ${agent.name}, a planning assistant managed by the workfarm system.`);
+    parts.push(`IMPORTANT: You must plan EXACTLY for the goal below. Do not infer a different project name, rename the goal, or reinterpret what you're working on. The goal is authoritative.`);
+
+    parts.push(`\n=== YOUR ASSIGNED GOAL (do not modify) ===`);
+    parts.push(`"${goal.description}"`);
+    parts.push(`Working directory: ${goal.workingDirectory || this.workingDirectory}`);
+    if (this.workspaceRoots.length > 0) {
+      parts.push(`Workspace roots (you have access to these):\n${this.workspaceRoots.map(r => `  - ${r}`).join('\n')}`);
+    }
+    parts.push(`===========================================`);
 
     if (goal.constraints.length > 0) {
       parts.push(`\nConstraints:\n${goal.constraints.map(c => `- ${c}`).join('\n')}`);
@@ -394,7 +420,9 @@ export class ClaudeCodeBridge {
         message,
         this.workingDirectory,
         systemPrompt,
-        agent.approvedTools
+        agent.approvedTools,
+        undefined,
+        this.workspaceRoots
       );
       return { success: true };
     } catch (error) {

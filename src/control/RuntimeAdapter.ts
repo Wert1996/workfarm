@@ -17,6 +17,8 @@ export interface RuntimeAdapter {
     systemPrompt?: string;
     allowedTools?: string[];
     maxTurns?: number;
+    agentId?: string;
+    additionalDirs?: string[];
   }): Promise<{ success: boolean; sessionId: string }>;
 
   sendToSession(options: {
@@ -24,6 +26,7 @@ export interface RuntimeAdapter {
     message: string;
     workingDirectory: string;
     allowedTools?: string[];
+    agentId?: string;
   }): Promise<{ success: boolean }>;
 
   stopSession(sessionId: string): Promise<{ success: boolean; error?: string }>;
@@ -58,6 +61,10 @@ export interface RuntimeAdapter {
   // --- Observability logs (append-only JSONL) ---
   appendLog(agentId: string, event: any): Promise<void>;
   readLogs(agentId: string, opts?: { since?: number; until?: number }): Promise<any[]>;
+
+  // --- Config ---
+  loadConfig(): Promise<Record<string, any>>;
+  saveConfig(config: Record<string, any>): Promise<{ success: boolean; error?: string }>;
 
   // --- File System / Environment ---
   getWorkingDirectory(): Promise<string>;

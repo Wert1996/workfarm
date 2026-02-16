@@ -228,7 +228,7 @@ export class PlannerLoop {
     this.goalManager.updatePlanStep(goalId, blockedStep.id, { taskId: task.id });
     this.stepTaskMap.set(task.id, { goalId, stepId: blockedStep.id });
 
-    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep);
+    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep, goal.workingDirectory);
     if (!result.success) {
       this.goalManager.updatePlanStep(goalId, blockedStep.id, {
         status: 'failed',
@@ -354,7 +354,7 @@ export class PlannerLoop {
       }
     });
 
-    const result = await this.bridge.executeTask(agent.id, planTask.id, goal.maxTurnsPerStep);
+    const result = await this.bridge.executeTask(agent.id, planTask.id, goal.maxTurnsPerStep, goal.workingDirectory);
     if (!result.success) {
       unsub();
       console.log(`[PlannerLoop] Failed to start planning: ${result.error}`);
@@ -462,7 +462,7 @@ export class PlannerLoop {
     this.goalManager.updatePlanStep(goalId, step.id, { taskId: task.id });
     this.stepTaskMap.set(task.id, { goalId, stepId: step.id });
 
-    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep);
+    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep, goal.workingDirectory);
     if (!result.success) {
       this.goalManager.updatePlanStep(goalId, step.id, {
         status: 'failed',

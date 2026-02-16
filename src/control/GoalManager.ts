@@ -41,7 +41,7 @@ export class GoalManager {
   createGoal(
     agentId: string,
     description: string,
-    opts?: { systemPrompt?: string; constraints?: string[]; maxTurnsPerStep?: number }
+    opts?: { systemPrompt?: string; constraints?: string[]; maxTurnsPerStep?: number; workingDirectory?: string }
   ): AgentGoal {
     const goal: AgentGoal = {
       id: uuidv4(),
@@ -49,6 +49,7 @@ export class GoalManager {
       description,
       systemPrompt: opts?.systemPrompt,
       constraints: opts?.constraints || [],
+      workingDirectory: opts?.workingDirectory,
       status: 'active',
       maxTurnsPerStep: opts?.maxTurnsPerStep || 10,
       createdAt: Date.now(),
@@ -61,7 +62,7 @@ export class GoalManager {
     return goal;
   }
 
-  updateGoal(goalId: string, updates: Partial<Pick<AgentGoal, 'description' | 'systemPrompt' | 'constraints' | 'status' | 'maxTurnsPerStep'>>): AgentGoal | undefined {
+  updateGoal(goalId: string, updates: Partial<Pick<AgentGoal, 'description' | 'systemPrompt' | 'constraints' | 'status' | 'maxTurnsPerStep' | 'workingDirectory'>>): AgentGoal | undefined {
     const goal = this.goals.get(goalId);
     if (!goal) return undefined;
 
@@ -91,6 +92,15 @@ export class GoalManager {
     eventBus.emit('goal_resumed', { goalId, agentId: goal.agentId });
     this.save();
     return goal;
+  }
+
+  deleteGoal(goalId: string): boolean {
+    const goal = this.goals.get(goalId);
+    if (!goal) return false;
+    this.goals.delete(goalId);
+    this.plans.delete(goalId);
+    this.save();
+    return true;
   }
 
   getGoal(goalId: string): AgentGoal | undefined {

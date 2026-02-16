@@ -66,6 +66,11 @@ export class PreferenceManager {
     return newPref;
   }
 
+  clearPreferences(agentId: string): void {
+    this.preferences.delete(agentId);
+    this.saveForAgent(agentId);
+  }
+
   removePreference(agentId: string, key: string): boolean {
     const prefs = this.preferences.get(agentId);
     if (!prefs) return false;

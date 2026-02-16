@@ -4,6 +4,7 @@ export interface AgentGoal {
   description: string;
   systemPrompt?: string;
   constraints: string[];
+  workingDirectory?: string;
   status: 'active' | 'paused' | 'completed' | 'failed';
   maxTurnsPerStep: number;
   createdAt: number;

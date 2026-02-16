@@ -42,6 +42,9 @@ export class ElectronAdapter implements RuntimeAdapter {
   claudeCodeCancel(agentId: string) { return this.api.claudeCodeCancel(agentId); }
   onClaudeCodeProgress(callback: Parameters<RuntimeAdapter['onClaudeCodeProgress']>[0]) { return this.api.onClaudeCodeProgress(callback); }
 
+  loadConfig() { return this.api.loadConfig(); }
+  saveConfig(config: Record<string, any>) { return this.api.saveConfig(config); }
+
   ensureSkills(workingDirectory: string) { return this.api.ensureSkills(workingDirectory); }
   getWorkingDirectory() { return this.api.getWorkingDirectory(); }
   selectDirectory() { return this.api.selectDirectory(); }
