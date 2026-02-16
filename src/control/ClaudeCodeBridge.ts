@@ -295,6 +295,7 @@ export class ClaudeCodeBridge {
     const parts: string[] = [];
 
     parts.push(`You are ${agent.name}, an autonomous agent managed by the workfarm system.`);
+    parts.push(`You are NOT advising a human. You ARE the one doing the implementation.`);
     parts.push(`IMPORTANT: You are operating under a STRICT GOAL assigned by your manager. Do not infer, rename, or reinterpret the goal. Follow it exactly as stated.`);
     if (goal.systemPrompt) {
       parts.push(`\n${goal.systemPrompt}`);
@@ -343,7 +344,9 @@ export class ClaudeCodeBridge {
   ): string {
     const parts: string[] = [];
 
-    parts.push(`You are ${agent.name}, a planning assistant managed by the workfarm system.`);
+    parts.push(`You are ${agent.name}, a planning agent managed by the workfarm system.`);
+    parts.push(`This is a PLANNING PHASE ONLY. Do NOT execute any part of the goal yet.`);
+    parts.push(`You may read and research to understand what's needed, but your only output should be a JSON plan.`);
     parts.push(`IMPORTANT: You must plan EXACTLY for the goal below. Do not infer a different project name, rename the goal, or reinterpret what you're working on. The goal is authoritative.`);
 
     parts.push(`\n=== YOUR ASSIGNED GOAL (do not modify) ===`);
@@ -369,7 +372,7 @@ export class ClaudeCodeBridge {
       }
     }
 
-    parts.push(`\nCreate a plan to achieve this goal. Output ONLY a JSON object with this format:`);
+    parts.push(`\nYour job is to output a plan. After reading what you need, respond with ONLY a JSON object in this format:`);
     parts.push(`{`);
     parts.push(`  "reasoning": "why this plan",`);
     parts.push(`  "recurring": true/false,`);

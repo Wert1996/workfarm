@@ -139,10 +139,18 @@ export class SessionManager {
             toolName: d.tool_name || d.toolName || 'unknown',
             toolInput: d.tool_input || d.toolInput || {},
           }));
-          session.pendingPermissions = denials;
+          // Deduplicate by tool name — only prompt once per unique tool
+          const seenTools = new Set<string>();
+          const uniqueDenials = denials.filter((d: any) => {
+            const lower = d.toolName.toLowerCase();
+            if (seenTools.has(lower)) return false;
+            seenTools.add(lower);
+            return true;
+          });
+          session.pendingPermissions = uniqueDenials;
           session.status = 'waiting_input';
           eventBus.emit('session_status_changed', { sessionId, status: 'waiting_input' });
-          for (const denial of denials) {
+          for (const denial of uniqueDenials) {
             eventBus.emit('permission_requested', {
               sessionId,
               agentId: session.agentId,

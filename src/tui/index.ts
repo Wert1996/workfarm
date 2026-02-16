@@ -40,10 +40,9 @@ async function promptForWorkspaceRoots(rl: readline.Interface): Promise<string[]
 }
 
 async function main() {
-  const home = process.env.HOME || process.env.USERPROFILE || process.cwd();
-  const workingDirectory = process.argv[2] || home;
-
-  const runtime = new NodeAdapter({ workingDirectory });
+  // Bootstrap with a temporary working directory to load config
+  const tempDir = process.argv[2] || process.cwd();
+  const runtime = new NodeAdapter({ workingDirectory: tempDir });
 
   // Load config and check for first-run setup
   const config = await runtime.loadConfig();
@@ -61,6 +60,8 @@ async function main() {
   setupRl.close();
 
   const workspaceRoots: string[] = config.workspaceRoots;
+  // Use explicit arg, or first workspace root, as the default working directory
+  const workingDirectory = process.argv[2] || workspaceRoots[0];
 
   console.log(`\n  Work Farm TUI`);
   console.log(`  workspaces: ${workspaceRoots.join(', ')}\n`);
@@ -75,6 +76,7 @@ async function main() {
 
   const bridge = new ClaudeCodeBridge(runtime, agentManager, taskManager);
   await bridge.initialize();
+  bridge.setWorkingDirectory(workingDirectory);
   bridge.setWorkspaceRoots(workspaceRoots);
 
   const preferenceManager = new PreferenceManager(runtime);
@@ -320,7 +322,8 @@ async function main() {
         }
         const agent = findAgent(agentName);
         if (!agent) break;
-        const goal = goalManager.createGoal(agent.id, desc, { workingDirectory: goalWorkDir });
+        const effectiveWorkDir = goalWorkDir || bridge.getWorkingDirectory();
+        const goal = goalManager.createGoal(agent.id, desc, { workingDirectory: effectiveWorkDir });
         console.log(`  Goal created for ${agent.name}: ${goal.description}`);
         if (goalWorkDir) console.log(`  Working directory: ${goalWorkDir}`);
         console.log(`  Goal ID: ${goal.id.substring(0, 8)}`);

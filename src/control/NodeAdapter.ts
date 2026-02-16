@@ -232,6 +232,7 @@ export class NodeAdapter implements RuntimeAdapter {
       '--include-partial-messages',
       '--session-id', sessionId,
       '--setting-sources', 'user',
+      '--disallowedTools', 'EnterPlanMode,ExitPlanMode,AskUserQuestion',
     ];
 
     if (systemPrompt) {
