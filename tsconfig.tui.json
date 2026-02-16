@@ -24,6 +24,7 @@
     "node_modules", "dist",
     "src/game/**/*", "src/main.ts",
     "src/control/ElectronAdapter.ts",
-    "src/control/index.ts"
+    "src/control/index.ts",
+    "src/control/PlannerLoop.ts"
   ]
 }

@@ -19,6 +19,7 @@ export interface RuntimeAdapter {
     maxTurns?: number;
     agentId?: string;
     additionalDirs?: string[];
+    noTools?: boolean;
   }): Promise<{ success: boolean; sessionId: string }>;
 
   sendToSession(options: {

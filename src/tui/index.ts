@@ -6,7 +6,8 @@ import { AgentManager } from '../control/AgentManager';
 import { TaskManager } from '../control/TaskManager';
 import { ClaudeCodeBridge } from '../control/ClaudeCodeBridge';
 import { GoalManager } from '../control/GoalManager';
-import { PlannerLoop } from '../control/PlannerLoop';
+import { AdversaryAgent } from '../control/AdversaryAgent';
+import { ClaudeCLILLMClient } from '../control/LLMClient';
 import { TriggerScheduler } from '../control/TriggerScheduler';
 import { PreferenceManager } from '../control/PreferenceManager';
 import { ObservabilityModule } from '../observe/ObservabilityModule';
@@ -85,10 +86,10 @@ async function main() {
     await preferenceManager.loadForAgent(agent.id);
   }
 
-  const plannerLoop = new PlannerLoop(goalManager, agentManager, taskManager, bridge);
-  plannerLoop.setPreferenceManager(preferenceManager);
+  const llmClient = new ClaudeCLILLMClient(runtime);
+  const adversary = new AdversaryAgent(llmClient, goalManager, agentManager, taskManager, bridge, preferenceManager);
   const triggerScheduler = new TriggerScheduler();
-  triggerScheduler.start(goalManager, plannerLoop);
+  triggerScheduler.start(goalManager, adversary);
 
   const observability = new ObservabilityModule(runtime);
   observability.start();
@@ -452,7 +453,7 @@ async function main() {
           break;
         }
         console.log(`  Waking ${agent.name} for goal: ${goal.description.substring(0, 50)}`);
-        await plannerLoop.wake(goal.id);
+        await adversary.wake(goal.id);
         break;
       }
 
@@ -469,7 +470,7 @@ async function main() {
           console.log(`  ${agent.name} has no active goal.`);
           break;
         }
-        plannerLoop.pause(goal.id);
+        adversary.pause(goal.id);
         console.log(`  Paused ${agent.name}'s goal: ${goal.description.substring(0, 50)}`);
         break;
       }
@@ -484,29 +485,9 @@ async function main() {
         const agent = findAgent(agentName);
         if (!agent) break;
 
-        // Build context from goal/plan/activity
-        const goal = goalManager.getActiveGoal(agent.id);
-        let context = `You are ${agent.name}. The user wants to talk to you about your progress.`;
-        if (goal) {
-          context += `\n\nYour current goal: ${goal.description}`;
-          const plan = goalManager.getCurrentPlan(goal.id);
-          if (plan) {
-            context += `\nPlan (v${plan.version}):`;
-            for (const step of plan.steps) {
-              context += `\n  [${step.status}] Step ${step.order + 1}: ${step.description}`;
-              if (step.result) context += ` — ${step.result.substring(0, 100)}`;
-            }
-          }
-        }
         const summary = await observability.getAgentSummary(agent.id, 10);
-        if (summary !== 'No activity recorded.') {
-          context += `\n\nRecent activity:\n${summary}`;
-        }
-
-        const result = await bridge.startConversation(agent.id, message, context);
-        if (!result.success) {
-          console.log(`  Error: ${result.error}`);
-        }
+        const response = await adversary.talk(agent.id, message, summary);
+        console.log(`  [${agent.name}] ${response}`);
         break;
       }
 
@@ -614,7 +595,7 @@ async function main() {
           break;
         }
         console.log(`  Sending reply to ${agent.name}...`);
-        await plannerLoop.reply(goal.id, answer);
+        await adversary.reply(goal.id, answer);
         break;
       }
 
@@ -737,7 +718,7 @@ async function main() {
         console.log('  Shutting down...');
         triggerScheduler.stop();
         observability.stop();
-        plannerLoop.destroy();
+        adversary.destroy();
         bridge.destroy();
         runtime.destroy();
         rl.close();
