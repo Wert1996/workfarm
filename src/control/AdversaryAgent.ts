@@ -20,6 +20,8 @@ export class AdversaryAgent {
   private preferenceManager: PreferenceManager | null = null;
   private activeGoals: Set<string> = new Set();
   private stepTaskMap: Map<string, { goalId: string; stepId: string }> = new Map();
+  private reconTaskMap: Map<string, string> = new Map(); // taskId -> goalId
+  private reconResults: Map<string, string> = new Map(); // goalId -> recon report
   private retryMap: Map<string, number> = new Map(); // stepId -> retryCount
   private eventCleanups: (() => void)[] = [];
 
@@ -47,6 +49,25 @@ export class AdversaryAgent {
   private setupListeners(): void {
     const unsub = eventBus.on('session_ended', (event) => {
       const { taskId, status } = event.data;
+
+      // Handle recon task completion
+      const reconGoalId = this.reconTaskMap.get(taskId);
+      if (reconGoalId) {
+        this.reconTaskMap.delete(taskId);
+        const task = this.taskManager.getTask(taskId);
+        const result = task?.result || '';
+        if (status === 'completed' && result) {
+          this.reconResults.set(reconGoalId, result);
+          console.log(`[Adversary] Recon complete, generating informed plan...`);
+          this.generatePlan(reconGoalId);
+        } else {
+          console.log(`[Adversary] Recon failed, generating plan without context`);
+          this.generatePlan(reconGoalId);
+        }
+        return;
+      }
+
+      // Handle step task completion
       const mapping = this.stepTaskMap.get(taskId);
       if (!mapping) return;
 
@@ -57,21 +78,10 @@ export class AdversaryAgent {
       const result = task?.result || (status === 'completed' ? 'Completed' : 'Failed');
 
       if (status === 'completed') {
-        // Check for [NEEDS_INPUT] marker
+        // Check for [NEEDS_INPUT] marker — try to answer before escalating
         const needsInput = this.extractNeedsInput(result);
         if (needsInput) {
-          this.goalManager.updatePlanStep(goalId, stepId, {
-            status: 'blocked',
-            question: needsInput,
-            result,
-          });
-          const goal = this.goalManager.getGoal(goalId);
-          eventBus.emit('question_raised', {
-            agentId: goal?.agentId,
-            goalId,
-            stepId,
-            question: needsInput,
-          });
+          this.tryAnswerOrEscalate(goalId, stepId, needsInput, result);
           return;
         }
 
@@ -165,7 +175,7 @@ export class AdversaryAgent {
     const nextStep = plan ? this.goalManager.getNextPendingStep(goalId) : undefined;
 
     if (!plan || !nextStep) {
-      await this.generatePlan(goalId);
+      await this.gatherContext(goalId);
       return;
     }
 
@@ -214,15 +224,10 @@ export class AdversaryAgent {
 
     this.activeGoals.add(goalId);
 
-    // Craft a worker instruction that incorporates the user's answer
-    const workerInstruction = [
-      `You previously asked: "${blockedStep.question}"`,
-      `The user answered: "${answer}"`,
-      `\nContinue with step ${blockedStep.order + 1}: ${blockedStep.description}`,
-      `Use the user's answer to proceed.`,
-    ].join('\n');
+    // Ask adversary LLM to craft a concrete instruction incorporating the user's answer
+    const workerInstruction = await this.craftReplyInstruction(goal, plan, blockedStep, answer);
 
-    const prompt = this.buildWorkerPrompt(agent, goal, workerInstruction);
+    const prompt = this.buildWorkerPrompt(agent, goal, workerInstruction, plan, blockedStep.id);
 
     const task = this.taskManager.createTask(`[Step ${blockedStep.order + 1} resumed] ${blockedStep.description}`);
     this.taskManager.assignAgent(task.id, agent.id);
@@ -231,7 +236,7 @@ export class AdversaryAgent {
     this.goalManager.updatePlanStep(goalId, blockedStep.id, { taskId: task.id });
     this.stepTaskMap.set(task.id, { goalId, stepId: blockedStep.id });
 
-    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep, goal.workingDirectory);
+    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep, goal.workingDirectory, prompt);
     if (!result.success) {
       this.goalManager.updatePlanStep(goalId, blockedStep.id, {
         status: 'failed',
@@ -285,6 +290,72 @@ export class AdversaryAgent {
     return this.activeGoals.has(goalId);
   }
 
+  // ── Private: Recon Phase ──
+
+  private async gatherContext(goalId: string): Promise<void> {
+    const goal = this.goalManager.getGoal(goalId);
+    if (!goal) {
+      this.activeGoals.delete(goalId);
+      return;
+    }
+
+    const agent = this.agentManager.getAgent(goal.agentId);
+    if (!agent) {
+      this.activeGoals.delete(goalId);
+      return;
+    }
+
+    const workDir = goal.workingDirectory || this.bridge.getWorkingDirectory();
+    const roots = this.bridge.getWorkspaceRoots();
+
+    console.log(`[Adversary] Scouting codebase before planning: ${goal.description}`);
+
+    const reconInstruction = [
+      `<instruction>`,
+      `You are ${agent.name}, an autonomous agent doing reconnaissance for a goal.`,
+      ``,
+      `Goal: "${goal.description}"`,
+      `Working directory: ${workDir}`,
+      roots.length > 0 ? `Workspace roots: ${roots.join(', ')}` : '',
+      ``,
+      `Your job is to EXPLORE and REPORT. Do NOT make any changes.`,
+      ``,
+      `Investigate the codebase and produce a report covering:`,
+      `1. Project location (exact path)`,
+      `2. Language(s) and framework(s)`,
+      `3. Directory structure (key directories and what they contain)`,
+      `4. Dependencies (from package.json, requirements.txt, etc.)`,
+      `5. Build/test setup (scripts, CI config)`,
+      `6. Current state — what exists, what's missing, what's broken`,
+      `7. Code quality observations — patterns, anti-patterns, test coverage`,
+      `8. Specific opportunities for improvement relevant to the goal`,
+      ``,
+      `End your response with a structured summary:`,
+      `<recon_summary>`,
+      `PROJECT_PATH: /exact/path`,
+      `LANGUAGE: ...`,
+      `FRAMEWORK: ...`,
+      `KEY_FILES: file1, file2, ...`,
+      `CURRENT_STATE: brief description`,
+      `IMPROVEMENT_OPPORTUNITIES: bullet list`,
+      `</recon_summary>`,
+      `</instruction>`,
+    ].filter(l => l !== undefined).join('\n');
+
+    const task = this.taskManager.createTask(`[Recon] ${goal.description}`);
+    this.taskManager.assignAgent(task.id, agent.id);
+    this.agentManager.assignTask(agent.id, task.id);
+    this.reconTaskMap.set(task.id, goalId);
+
+    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep, goal.workingDirectory, reconInstruction);
+    if (!result.success) {
+      this.reconTaskMap.delete(task.id);
+      console.log(`[Adversary] Recon failed to start: ${result.error}, planning without context`);
+      await this.generatePlan(goalId);
+    }
+    // Otherwise, the session_ended listener will call generatePlan with the recon results
+  }
+
   // ── Private: Plan Generation via LLM ──
 
   private async generatePlan(goalId: string): Promise<void> {
@@ -306,9 +377,15 @@ export class AdversaryAgent {
     if (existingPlan) {
       const completed = existingPlan.steps.filter(s => s.status === 'completed' && s.result);
       if (completed.length > 0) {
-        previousResultsStr = '\nPrevious results:\n' +
-          completed.map(s => `- ${s.description}: ${s.result!.substring(0, 200)}`).join('\n');
+        previousResultsStr = '\nPrevious step results:\n' +
+          completed.map(s => `- ${s.description}: ${s.result!.substring(0, 500)}`).join('\n');
       }
+    }
+
+    // Use recon report if available
+    const reconReport = this.reconResults.get(goalId);
+    if (reconReport) {
+      this.reconResults.delete(goalId); // consumed
     }
 
     const preferenceContext = this.getPreferenceContext(goal.agentId);
@@ -323,10 +400,14 @@ export class AdversaryAgent {
       `Constraints: ${goal.constraints.length > 0 ? goal.constraints.join(', ') : 'none'}`,
       `Working directory: ${workDir}`,
       roots.length > 0 ? `Workspace roots: ${roots.join(', ')}` : '',
+      reconReport ? `\n=== RECON REPORT (from worker's codebase exploration) ===\n${reconReport.substring(0, 3000)}\n===\n` : '',
       previousResultsStr,
       preferenceContext ? `\n${preferenceContext}` : '',
       ``,
-      `Create a plan. Output ONLY valid JSON:`,
+      `Create a plan based on the recon report above. Be SPECIFIC — use exact file paths, function names, and concrete actions from the report.`,
+      `Do NOT create generic steps like "explore codebase" — the recon is already done.`,
+      ``,
+      `Output ONLY valid JSON:`,
       `{`,
       `  "reasoning": "why this plan",`,
       `  "recurring": true/false,`,
@@ -362,9 +443,85 @@ export class AdversaryAgent {
       console.log(`[Adversary] Plan created: ${plan.steps.length} steps, recurring=${plan.recurring}`);
       await this.executeNextStep(goalId);
     } else {
-      console.log(`[Adversary] Failed to parse plan from LLM response`);
+      console.log(`[Adversary] Failed to parse plan from LLM response. First 500 chars:`);
+      console.log(response.content.substring(0, 500));
       this.goalManager.updateGoal(goalId, { status: 'failed' });
       this.activeGoals.delete(goalId);
+    }
+  }
+
+  // ── Private: Plan Refinement ──
+
+  private async refinePlan(goalId: string): Promise<void> {
+    const goal = this.goalManager.getGoal(goalId);
+    if (!goal) return;
+
+    const plan = this.goalManager.getCurrentPlan(goalId);
+    if (!plan) return;
+
+    const pendingSteps = plan.steps.filter(s => s.status === 'pending');
+    if (pendingSteps.length === 0) return; // nothing to refine
+
+    const completedSteps = plan.steps.filter(s => s.status === 'completed');
+    if (completedSteps.length === 0) return; // no context to refine from
+
+    const refinePrompt = [
+      `You are an orchestrator reviewing a plan in progress.`,
+      ``,
+      `Goal: "${goal.description}"`,
+      ``,
+      `Completed steps:`,
+      ...completedSteps.map(s => `  [done] Step ${s.order + 1}: ${s.description}\n    Result: ${(s.result || '').substring(0, 600)}`),
+      ``,
+      `Remaining steps:`,
+      ...pendingSteps.map(s => `  [pending] Step ${s.order + 1}: ${s.description}`),
+      ``,
+      `Based on what the completed steps revealed, should the remaining steps be adjusted?`,
+      `Output ONLY valid JSON:`,
+      `{`,
+      `  "needs_refinement": true | false,`,
+      `  "reasoning": "why or why not",`,
+      `  "refined_steps": [{"order": N, "description": "updated description"}]`,
+      `}`,
+      ``,
+      `Rules:`,
+      `- Only set needs_refinement=true if the completed results meaningfully change what remaining steps should do`,
+      `- Use exact file paths and concrete details learned from completed steps`,
+      `- Keep the same step order numbers — only update descriptions`,
+      `- If steps should be removed, set description to "SKIP"`,
+      `- If no changes needed, set needs_refinement=false and refined_steps=[]`,
+    ].join('\n');
+
+    const response = await this.llm.complete({ prompt: refinePrompt });
+    if (response.error || !response.content) return;
+
+    try {
+      const parsed = this.extractJSON(response.content);
+      if (!parsed || !parsed.needs_refinement || !Array.isArray(parsed.refined_steps)) return;
+
+      let refinedCount = 0;
+      for (const refined of parsed.refined_steps) {
+        if (typeof refined.order !== 'number' || !refined.description) continue;
+        const step = plan.steps.find(s => s.order === refined.order && s.status === 'pending');
+        if (!step) continue;
+
+        if (refined.description === 'SKIP') {
+          this.goalManager.updatePlanStep(goalId, step.id, { status: 'skipped' });
+          refinedCount++;
+        } else if (refined.description !== step.description) {
+          // Update step description in-place
+          step.description = refined.description;
+          refinedCount++;
+        }
+      }
+
+      if (refinedCount > 0) {
+        console.log(`[Adversary] Refined ${refinedCount} remaining step(s) based on results`);
+        // Save the updated plan
+        this.goalManager.getCurrentPlan(goalId); // trigger save via GoalManager
+      }
+    } catch {
+      // Parse failed — continue with existing plan
     }
   }
 
@@ -388,17 +545,20 @@ export class AdversaryAgent {
       `Working directory: ${workDir}`,
       roots.length > 0 ? `Workspace roots: ${roots.join(', ')}` : '',
       ``,
-      `Full plan:`,
+      `Full plan with results from completed steps:`,
       ...plan.steps.map(s => {
         const status = s.status === 'completed' ? '[done]' : s.status === 'failed' ? '[fail]' : s.id === step.id ? '[current]' : '[pending]';
-        const result = s.result ? ` — ${s.result.substring(0, 150)}` : '';
-        return `  ${status} Step ${s.order + 1}: ${s.description}${result}`;
+        let line = `  ${status} Step ${s.order + 1}: ${s.description}`;
+        if (s.status === 'completed' && s.result) {
+          line += `\n    Result: ${s.result.substring(0, 800)}`;
+        }
+        return line;
       }),
       ``,
       `Current step: Step ${step.order + 1}: ${step.description}`,
       ``,
       `Write a clear, detailed instruction for the worker to complete ONLY this step.`,
-      `Include specific file paths, commands, or actions if known from previous step results.`,
+      `CRITICAL: The worker has NO memory of previous steps. Include ALL relevant context from previous results — file paths, project structure, key findings — directly in your instruction.`,
       `The worker has full tool access (can read/write files, run commands, etc).`,
       `Output ONLY the instruction text, nothing else.`,
     ].filter(l => l !== undefined).join('\n');
@@ -407,6 +567,39 @@ export class AdversaryAgent {
     if (response.error || !response.content) {
       // Fallback to step description
       return step.description;
+    }
+    return response.content;
+  }
+
+  private async craftReplyInstruction(
+    goal: AgentGoal,
+    plan: AgentPlan,
+    step: PlanStep,
+    userAnswer: string
+  ): Promise<string> {
+    const workDir = goal.workingDirectory || this.bridge.getWorkingDirectory();
+
+    const craftPrompt = [
+      `You are an orchestrator. A worker agent was blocked on a step and asked the user a question.`,
+      `The user has now answered. Write a NEW, concrete instruction for the worker to continue.`,
+      ``,
+      `Goal: "${goal.description}"`,
+      `Working directory: ${workDir}`,
+      `Step: "${step.description}"`,
+      `Worker's previous result: "${(step.result || '').substring(0, 500)}"`,
+      `Question asked: "${step.question}"`,
+      `User's answer: "${userAnswer}"`,
+      ``,
+      `Write a clear instruction that INCORPORATES the user's answer directly.`,
+      `Don't just say "the user said X" — rewrite the step instruction so it includes the concrete information.`,
+      `For example, if the user said "it's in /foo/bar", write "Explore /foo/bar and ..."`,
+      `Output ONLY the instruction text, nothing else.`,
+    ].join('\n');
+
+    const response = await this.llm.complete({ prompt: craftPrompt });
+    if (response.error || !response.content) {
+      // Fallback
+      return `${step.description}\n\nAdditional context: ${step.question} Answer: ${userAnswer}`;
     }
     return response.content;
   }
@@ -462,9 +655,8 @@ export class AdversaryAgent {
 
     if (response.content) {
       try {
-        const jsonMatch = response.content.match(/\{[\s\S]*"verdict"[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
+        const parsed = this.extractJSON(response.content);
+        if (parsed) {
           verdict = parsed.verdict || 'PASS';
           refinedInstruction = parsed.refined_instruction || '';
           escalationQuestion = parsed.escalation_question || '';
@@ -483,6 +675,8 @@ export class AdversaryAgent {
         result,
         completedAt: Date.now(),
       });
+      // Refine remaining steps based on what we learned
+      await this.refinePlan(goalId);
       this.evaluateAndContinue(goalId);
     } else if (verdict === 'RETRY' && retryCount < 2) {
       this.retryMap.set(stepId, retryCount + 1);
@@ -492,13 +686,98 @@ export class AdversaryAgent {
       this.goalManager.updatePlanStep(goalId, stepId, { status: 'pending' });
       await this.executeStepWithInstruction(goalId, step, refinedInstruction || step.description);
     } else {
-      // ESCALATE (or max retries exceeded)
+      // ESCALATE (or max retries exceeded) — try to answer before bothering user
       this.retryMap.delete(stepId);
       const question = escalationQuestion || `Step ${step.order + 1} "${step.description}" needs your input after ${retryCount + 1} attempt(s). How should we proceed?`;
+      await this.tryAnswerOrEscalate(goalId, stepId, question, result);
+    }
+  }
+
+  // ── Private: Step Execution ──
+
+  private async tryAnswerOrEscalate(goalId: string, stepId: string, question: string, workerResult: string): Promise<void> {
+    const goal = this.goalManager.getGoal(goalId);
+    if (!goal) {
+      this.activeGoals.delete(goalId);
+      return;
+    }
+
+    const plan = this.goalManager.getCurrentPlan(goalId);
+    const step = plan?.steps.find(s => s.id === stepId);
+    if (!plan || !step) {
+      this.activeGoals.delete(goalId);
+      return;
+    }
+
+    const preferenceContext = this.getPreferenceContext(goal.agentId);
+    const workDir = goal.workingDirectory || this.bridge.getWorkingDirectory();
+
+    const triagePrompt = [
+      `You are an orchestrator managing a worker agent. The worker has raised a question.`,
+      `Decide: can you answer this yourself, or must it go to the human user?`,
+      ``,
+      `Goal: "${goal.description}"`,
+      `Working directory: ${workDir}`,
+      `Step: "${step.description}"`,
+      `Worker result so far: "${workerResult.substring(0, 1000)}"`,
+      `Worker's question: "${question}"`,
+      preferenceContext ? `\n${preferenceContext}` : '',
+      ``,
+      `Output ONLY valid JSON:`,
+      `{`,
+      `  "can_answer": true | false,`,
+      `  "answer": "your answer if can_answer is true",`,
+      `  "reasoning": "why you can or cannot answer"`,
+      `}`,
+      ``,
+      `Rules:`,
+      `- Answer if the information is in the goal, context, preferences, or can be reasonably inferred`,
+      `- Answer if it's a simple factual/technical question (e.g. "which framework?" when the goal implies one)`,
+      `- Do NOT answer if it requires the user's subjective preference, a policy decision, or information you truly don't have`,
+      `- When in doubt, escalate to the user`,
+    ].filter(l => l !== undefined).join('\n');
+
+    const response = await this.llm.complete({ prompt: triagePrompt });
+
+    let canAnswer = false;
+    let answer = '';
+
+    if (response.content) {
+      try {
+        const parsed = this.extractJSON(response.content);
+        if (parsed) {
+          canAnswer = parsed.can_answer === true;
+          answer = parsed.answer || '';
+        }
+      } catch {
+        // Parse failed — escalate to user
+      }
+    }
+
+    if (canAnswer && answer) {
+      console.log(`[Adversary] Auto-answering worker question: "${question.substring(0, 80)}"`);
+      console.log(`[Adversary] Answer: ${answer.substring(0, 120)}`);
+
+      // Re-dispatch step with the adversary's answer
+      this.goalManager.updatePlanStep(goalId, stepId, {
+        status: 'in_progress',
+        question: null,
+      });
+
+      const agent = this.agentManager.getAgent(goal.agentId);
+      if (!agent) {
+        this.activeGoals.delete(goalId);
+        return;
+      }
+
+      const workerInstruction = await this.craftReplyInstruction(goal, plan, step, answer);
+      await this.executeStepWithInstruction(goalId, step, workerInstruction);
+    } else {
+      // Escalate to user
       this.goalManager.updatePlanStep(goalId, stepId, {
         status: 'blocked',
         question,
-        result,
+        result: workerResult,
       });
       eventBus.emit('question_raised', {
         agentId: goal.agentId,
@@ -508,8 +787,6 @@ export class AdversaryAgent {
       });
     }
   }
-
-  // ── Private: Step Execution ──
 
   private async executeNextStep(goalId: string): Promise<void> {
     const goal = this.goalManager.getGoal(goalId);
@@ -572,7 +849,8 @@ export class AdversaryAgent {
 
     this.goalManager.updatePlanStep(goalId, step.id, { status: 'in_progress' });
 
-    const prompt = this.buildWorkerPrompt(agent, goal, workerInstruction);
+    const plan = this.goalManager.getCurrentPlan(goalId);
+    const prompt = this.buildWorkerPrompt(agent, goal, workerInstruction, plan || undefined, step.id);
 
     const task = this.taskManager.createTask(`[Step ${step.order + 1}] ${step.description}`);
     this.taskManager.assignAgent(task.id, agent.id);
@@ -581,7 +859,7 @@ export class AdversaryAgent {
     this.goalManager.updatePlanStep(goalId, step.id, { taskId: task.id });
     this.stepTaskMap.set(task.id, { goalId, stepId: step.id });
 
-    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep, goal.workingDirectory);
+    const result = await this.bridge.executeTask(agent.id, task.id, goal.maxTurnsPerStep, goal.workingDirectory, prompt);
     if (!result.success) {
       this.goalManager.updatePlanStep(goalId, step.id, {
         status: 'failed',
@@ -593,7 +871,7 @@ export class AdversaryAgent {
     }
   }
 
-  private buildWorkerPrompt(agent: { name: string; systemPrompt?: string }, goal: AgentGoal, workerInstruction: string): string {
+  private buildWorkerPrompt(agent: { name: string; systemPrompt?: string }, goal: AgentGoal, workerInstruction: string, plan?: AgentPlan, currentStepId?: string): string {
     const workDir = goal.workingDirectory || this.bridge.getWorkingDirectory();
     const roots = this.bridge.getWorkspaceRoots();
     const preferenceContext = this.getPreferenceContext(goal.agentId);
@@ -604,6 +882,21 @@ export class AdversaryAgent {
     if (agent.systemPrompt) {
       parts.push(agent.systemPrompt);
     }
+
+    // Include completed step results so the worker has context
+    if (plan) {
+      const completedSteps = plan.steps.filter(s => s.status === 'completed' && s.result && s.id !== currentStepId);
+      if (completedSteps.length > 0) {
+        parts.push(``);
+        parts.push(`<prior_context>`);
+        parts.push(`Results from previous steps (you have no memory of these — use this context):`);
+        for (const s of completedSteps) {
+          parts.push(`Step ${s.order + 1} "${s.description}": ${s.result!.substring(0, 600)}`);
+        }
+        parts.push(`</prior_context>`);
+      }
+    }
+
     parts.push(``);
     parts.push(`<worker_instruction>`);
     parts.push(workerInstruction);
@@ -622,6 +915,13 @@ export class AdversaryAgent {
     parts.push(``);
     parts.push(`Complete the instruction above. Be concise.`);
     parts.push(`If you encounter genuine uncertainty, end with "[NEEDS_INPUT]: your question"`);
+    parts.push(``);
+    parts.push(`When done, end your response with a brief summary of what you did and what you found:`);
+    parts.push(`<step_summary>`);
+    parts.push(`ACTIONS: what you did`);
+    parts.push(`RESULT: what happened`);
+    parts.push(`KEY_INFO: any paths, names, or facts the next step needs to know`);
+    parts.push(`</step_summary>`);
     parts.push(`</instruction>`);
 
     return parts.join('\n');
@@ -707,6 +1007,38 @@ export class AdversaryAgent {
     }
   }
 
+  /**
+   * Extract a JSON object from an LLM response, handling markdown fences and surrounding text.
+   */
+  private extractJSON(raw: string): any | null {
+    // Strip markdown code fences
+    const cleaned = raw.replace(/```(?:json)?\s*\n?/g, '').replace(/```\s*$/gm, '').trim();
+
+    // 1. Try direct parse
+    try {
+      return JSON.parse(cleaned);
+    } catch { /* not direct JSON */ }
+
+    // 2. Balanced brace extraction (first { to its matching })
+    const startIdx = cleaned.indexOf('{');
+    if (startIdx !== -1) {
+      let depth = 0;
+      for (let i = startIdx; i < cleaned.length; i++) {
+        if (cleaned[i] === '{') depth++;
+        else if (cleaned[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            try {
+              return JSON.parse(cleaned.substring(startIdx, i + 1));
+            } catch { break; }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
   private parsePlanFromResult(result: string): {
     reasoning: string;
     steps: { description: string }[];
@@ -715,43 +1047,37 @@ export class AdversaryAgent {
     cycleGoal: string | null;
     completionCriteria: string | null;
   } | null {
-    try {
-      const jsonMatch = result.match(/\{[\s\S]*"steps"[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
-          return {
-            reasoning: parsed.reasoning || 'Plan generated by adversary',
-            steps: parsed.steps.map((s: any) => ({
-              description: typeof s === 'string' ? s : s.description || String(s),
-            })),
-            recurring: parsed.recurring === true,
-            intervalMinutes: typeof parsed.interval_minutes === 'number' ? parsed.interval_minutes : null,
-            cycleGoal: parsed.cycle_goal || null,
-            completionCriteria: parsed.completion_criteria || null,
-          };
-        }
-      }
+    const parsed = this.extractJSON(result);
+    if (!parsed) return null;
 
-      const arrayMatch = result.match(/\[[\s\S]*\]/);
-      if (arrayMatch) {
-        const parsed = JSON.parse(arrayMatch[0]);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return {
-            reasoning: 'Plan generated by adversary',
-            steps: parsed.map((s: any) => ({
-              description: typeof s === 'string' ? s : s.description || String(s),
-            })),
-            recurring: false,
-            intervalMinutes: null,
-            cycleGoal: null,
-            completionCriteria: null,
-          };
-        }
-      }
-    } catch {
-      // Parsing failed
+    // Handle object with "steps" array
+    if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
+      return {
+        reasoning: parsed.reasoning || 'Plan generated by adversary',
+        steps: parsed.steps.map((s: any) => ({
+          description: typeof s === 'string' ? s : s.description || String(s),
+        })),
+        recurring: parsed.recurring === true,
+        intervalMinutes: typeof parsed.interval_minutes === 'number' ? parsed.interval_minutes : null,
+        cycleGoal: parsed.cycle_goal || null,
+        completionCriteria: parsed.completion_criteria || null,
+      };
     }
+
+    // Handle bare array
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return {
+        reasoning: 'Plan generated by adversary',
+        steps: parsed.map((s: any) => ({
+          description: typeof s === 'string' ? s : s.description || String(s),
+        })),
+        recurring: false,
+        intervalMinutes: null,
+        cycleGoal: null,
+        completionCriteria: null,
+      };
+    }
+
     return null;
   }
 }

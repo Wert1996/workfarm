@@ -25,8 +25,9 @@ export class ClaudeCLILLMClient implements ILLMClient {
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
-    const sessionId = `llm-${uuidv4()}`;
+    const sessionId = uuidv4();
     let content = '';
+    let stderrContent = '';
     let finished = false;
     let error: string | undefined;
 
@@ -35,6 +36,12 @@ export class ClaudeCLILLMClient implements ILLMClient {
         if (data.sessionId !== sessionId) return;
 
         const event = data.event;
+
+        // Capture stderr for debugging
+        if (event.type === 'system' && event.subtype === 'stderr') {
+          stderrContent += event.content || '';
+          return;
+        }
 
         // Collect assistant text from streaming events
         if (event.type === 'assistant' && event.message) {
@@ -52,19 +59,25 @@ export class ClaudeCLILLMClient implements ILLMClient {
           }
         }
 
-        // Session ended
-        if (event.type === 'result') {
+        // CLI result event (subtype: 'success') — extract result text
+        if (event.type === 'result' && event.subtype === 'success') {
+          if (event.result && !content) {
+            content = typeof event.result === 'string' ? event.result : JSON.stringify(event.result);
+          }
+          // Don't resolve yet — wait for process close to confirm
+          return;
+        }
+
+        // Process close event (subtype: 'close' or 'error')
+        if (event.type === 'result' && (event.subtype === 'close' || event.subtype === 'error')) {
           if (finished) return;
           finished = true;
           cleanup();
 
-          // Extract result text if present and no streaming content was captured
-          if (!content && event.result) {
-            content = typeof event.result === 'string' ? event.result : JSON.stringify(event.result);
-          }
-
           if (event.subtype === 'error') {
-            error = event.error || 'LLM session ended with error';
+            const errMsg = stderrContent.trim() || event.error || `LLM session exited with code ${event.exitCode}`;
+            console.error(`[LLMClient] stderr: ${stderrContent.trim()}`);
+            error = errMsg;
           }
 
           resolve(error ? { content: '', error } : { content });

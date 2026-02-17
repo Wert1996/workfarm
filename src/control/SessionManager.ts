@@ -111,7 +111,7 @@ export class SessionManager {
     // console.log('[SessionManager] event received:', sessionId.substring(0, 8), event.type, event.subtype || '');
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.warn('[SessionManager] no session found for:', sessionId.substring(0, 8));
+      // Silently ignore — LLM-only sessions (adversary) bypass SessionManager
       return;
     }
 

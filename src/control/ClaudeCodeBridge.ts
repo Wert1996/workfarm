@@ -161,7 +161,7 @@ export class ClaudeCodeBridge {
     return parts.join('\n');
   }
 
-  async executeTask(agentId: string, taskId: string, maxTurns?: number, workingDirectory?: string): Promise<{
+  async executeTask(agentId: string, taskId: string, maxTurns?: number, workingDirectory?: string, promptOverride?: string): Promise<{
     success: boolean;
     response: string;
     error?: string;
@@ -169,36 +169,26 @@ export class ClaudeCodeBridge {
     const agent = this.agentManager.getAgent(agentId);
     const task = this.taskManager.getTask(taskId);
 
-    console.log('[executeTask] agent:', agent?.name, 'task:', task?.id, 'activeExecutions:', this.activeExecutions.get(agentId));
-
     if (!agent || !task) {
-      console.error('[executeTask] Agent or task not found');
       return { success: false, response: '', error: 'Agent or task not found' };
     }
 
     if (this.activeExecutions.get(agentId)) {
-      console.error('[executeTask] Agent is busy — activeExecutions stuck');
       return { success: false, response: '', error: 'Agent is busy' };
     }
 
     this.activeExecutions.set(agentId, true);
 
     try {
-      console.log('[executeTask] step 1: updating state');
       this.agentManager.updateAgentState(agentId, 'thinking');
       this.taskManager.startTask(taskId);
       this.taskManager.addLog(taskId, `${agent.name} started working`);
 
       const effectiveDir = workingDirectory || this.workingDirectory;
-      console.log('[executeTask] step 2: ensuring skills, workingDir:', effectiveDir);
-      // Ensure skills before starting
       await this.ensureSkills();
 
-      console.log('[executeTask] step 3: building prompt');
-      const prompt = this.buildPrompt(agent, task);
+      const prompt = promptOverride || this.buildPrompt(agent, task);
 
-      console.log('[executeTask] step 4: starting session');
-      // Start an interactive session instead of one-shot execution
       const systemPrompt = agent.systemPrompt
         ? `${agent.systemPrompt}\n\n${FIND_SKILLS_SUMMARY}`
         : FIND_SKILLS_SUMMARY;
@@ -213,11 +203,8 @@ export class ClaudeCodeBridge {
         this.workspaceRoots
       );
 
-      console.log('[executeTask] step 5: session started');
-      // Session completion is handled asynchronously via session_ended event
       return { success: true, response: 'Session started' };
     } catch (error) {
-      console.error('[executeTask] caught error:', error);
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.taskManager.failTask(taskId, errorMsg);
       this.agentManager.unassignTask(agentId);
