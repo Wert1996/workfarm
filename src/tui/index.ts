@@ -6,7 +6,8 @@ import { AgentManager } from '../control/AgentManager';
 import { TaskManager } from '../control/TaskManager';
 import { ClaudeCodeBridge } from '../control/ClaudeCodeBridge';
 import { GoalManager } from '../control/GoalManager';
-import { PlannerLoop } from '../control/PlannerLoop';
+import { AdversaryAgent } from '../control/AdversaryAgent';
+import { ClaudeCLILLMClient } from '../control/LLMClient';
 import { TriggerScheduler } from '../control/TriggerScheduler';
 import { PreferenceManager } from '../control/PreferenceManager';
 import { ObservabilityModule } from '../observe/ObservabilityModule';
@@ -40,10 +41,9 @@ async function promptForWorkspaceRoots(rl: readline.Interface): Promise<string[]
 }
 
 async function main() {
-  const home = process.env.HOME || process.env.USERPROFILE || process.cwd();
-  const workingDirectory = process.argv[2] || home;
-
-  const runtime = new NodeAdapter({ workingDirectory });
+  // Bootstrap with a temporary working directory to load config
+  const tempDir = process.argv[2] || process.cwd();
+  const runtime = new NodeAdapter({ workingDirectory: tempDir });
 
   // Load config and check for first-run setup
   const config = await runtime.loadConfig();
@@ -61,6 +61,8 @@ async function main() {
   setupRl.close();
 
   const workspaceRoots: string[] = config.workspaceRoots;
+  // Use explicit arg, or first workspace root, as the default working directory
+  const workingDirectory = process.argv[2] || workspaceRoots[0];
 
   console.log(`\n  Work Farm TUI`);
   console.log(`  workspaces: ${workspaceRoots.join(', ')}\n`);
@@ -75,6 +77,7 @@ async function main() {
 
   const bridge = new ClaudeCodeBridge(runtime, agentManager, taskManager);
   await bridge.initialize();
+  bridge.setWorkingDirectory(workingDirectory);
   bridge.setWorkspaceRoots(workspaceRoots);
 
   const preferenceManager = new PreferenceManager(runtime);
@@ -83,28 +86,18 @@ async function main() {
     await preferenceManager.loadForAgent(agent.id);
   }
 
-  const plannerLoop = new PlannerLoop(goalManager, agentManager, taskManager, bridge);
-  plannerLoop.setPreferenceManager(preferenceManager);
+  const llmClient = new ClaudeCLILLMClient(runtime);
+  const adversary = new AdversaryAgent(llmClient, goalManager, agentManager, taskManager, bridge, preferenceManager);
   const triggerScheduler = new TriggerScheduler();
-  triggerScheduler.start(goalManager, plannerLoop);
+  triggerScheduler.start(goalManager, adversary);
 
   const observability = new ObservabilityModule(runtime);
   observability.start();
 
   // --- Event subscriptions for live output ---
 
-  eventBus.on('session_message', (event) => {
-    const { message, agentId } = event.data;
-    const agent = agentId ? agentManager.getAgent(agentId) : null;
-    const name = agent?.name || 'agent';
-
-    if (message.type === 'assistant') {
-      process.stdout.write(`  [${name}] ${message.content}\n`);
-    } else if (message.type === 'tool_use') {
-      const toolName = message.metadata?.toolName || 'tool';
-      process.stdout.write(`  [${name}] using ${toolName}...\n`);
-    }
-  });
+  // Worker output is hidden - they run in background
+  // Only adversary high-level status messages (from AdversaryAgent.ts console.logs) are shown
 
   eventBus.on('permission_requested', (event) => {
     const { agentId, toolName } = event.data;
@@ -114,38 +107,8 @@ async function main() {
     console.log(`     deny ${agent?.name?.toLowerCase()}\n`);
   });
 
-  eventBus.on('task_completed', (event) => {
-    const { task } = event.data;
-    console.log(`\n  Task completed: ${task.description.substring(0, 60)}`);
-    if (task.result) {
-      console.log(`  Result: ${task.result.substring(0, 200)}`);
-    }
-    console.log();
-  });
-
-  eventBus.on('task_failed', (event) => {
-    const { task, error } = event.data;
-    console.log(`\n  Task failed: ${task.description.substring(0, 60)}`);
-    console.log(`  Error: ${error}\n`);
-  });
-
-  eventBus.on('step_started', (event) => {
-    const { description, agentId } = event.data;
-    const agent = agentId ? agentManager.getAgent(agentId) : null;
-    console.log(`  [${agent?.name || 'agent'}] Step started: ${description}`);
-  });
-
-  eventBus.on('step_completed', (event) => {
-    const { result, agentId } = event.data;
-    const agent = agentId ? agentManager.getAgent(agentId) : null;
-    console.log(`  [${agent?.name || 'agent'}] Step completed: ${(result || '').substring(0, 100)}`);
-  });
-
-  eventBus.on('step_failed', (event) => {
-    const { error, agentId } = event.data;
-    const agent = agentId ? agentManager.getAgent(agentId) : null;
-    console.log(`  [${agent?.name || 'agent'}] Step failed: ${(error || '').substring(0, 100)}`);
-  });
+  // Task/step events hidden - workers run silently
+  // Use 'status <agent>' command to check progress
 
   eventBus.on('question_raised', (event) => {
     const { agentId, question } = event.data;
@@ -236,29 +199,6 @@ async function main() {
         break;
       }
 
-      case 'assign': {
-        const agentName = parts[1];
-        const desc = parts.slice(2).join(' ');
-        if (!agentName || !desc) {
-          console.log('  Usage: assign <agent> <task description>');
-          break;
-        }
-        const agent = findAgent(agentName);
-        if (!agent) break;
-        if (agent.currentTaskId) {
-          console.log(`  ${agent.name} is busy.`);
-          break;
-        }
-        const task = taskManager.createTask(desc);
-        taskManager.assignAgent(task.id, agent.id);
-        agentManager.assignTask(agent.id, task.id);
-        const result = await bridge.executeTask(agent.id, task.id);
-        if (!result.success) {
-          console.log(`  Error: ${result.error}`);
-        }
-        break;
-      }
-
       case 'approve': {
         const agentName = parts[1];
         const toolName = parts[2];
@@ -286,17 +226,67 @@ async function main() {
         break;
       }
 
-      case 'tasks': {
-        const tasks = taskManager.getAllTasks();
-        if (tasks.length === 0) {
-          console.log('  No tasks.');
+      case 'status': {
+        const agentName = parts[1];
+        if (!agentName) {
+          // Show all agents' status
+          const agents = agentManager.getAllAgents();
+          if (agents.length === 0) {
+            console.log('  No agents hired.');
+            break;
+          }
+          for (const agent of agents) {
+            const goals = goalManager.getGoalsForAgent(agent.id);
+            const activeGoal = goals.find(g => g.status === 'active');
+            if (activeGoal) {
+              console.log(`\n  ${agent.name}: ${activeGoal.description} [${activeGoal.status}]`);
+            } else {
+              console.log(`\n  ${agent.name}: idle`);
+            }
+          }
           break;
         }
-        for (const t of tasks) {
-          const agentName = t.assignedAgentId
-            ? agentManager.getAgent(t.assignedAgentId)?.name || '?'
-            : '-';
-          console.log(`  [${t.status}] ${t.description.substring(0, 50)}  (${agentName})`);
+
+        // Show detailed status for specific agent
+        const agent = findAgent(agentName);
+        if (!agent) break;
+
+        const goals = goalManager.getGoalsForAgent(agent.id);
+        if (goals.length === 0) {
+          console.log(`\n  ${agent.name} has no goals.\n`);
+          break;
+        }
+
+        for (const goal of goals) {
+          console.log(`\n  Goal: ${goal.description}`);
+          console.log(`  Status: ${goal.status}`);
+          if (goal.workingDirectory) {
+            console.log(`  Working directory: ${goal.workingDirectory}`);
+          }
+
+          const plan = goalManager.getCurrentPlan(goal.id);
+          if (plan && plan.steps.length > 0) {
+            console.log(`  Plan (${plan.steps.length} steps):`);
+            for (const step of plan.steps) {
+              const status = step.status === 'completed' ? '✓' :
+                            step.status === 'in_progress' ? '→' :
+                            step.status === 'failed' ? '✗' :
+                            step.status === 'skipped' ? '⊘' : '○';
+              console.log(`    ${status} Step ${step.order + 1}: ${step.description}`);
+              if (step.status === 'in_progress' && step.question) {
+                console.log(`      ⚠ Waiting for answer: ${step.question.substring(0, 80)}`);
+              }
+              if (step.status === 'completed' && step.result) {
+                console.log(`      Result: ${step.result.substring(0, 150)}...`);
+              }
+              if (step.status === 'failed' && step.result) {
+                console.log(`      Error: ${step.result.substring(0, 150)}`);
+              }
+            }
+          } else {
+            console.log(`  No plan yet.`);
+          }
+          console.log();
         }
         break;
       }
@@ -320,7 +310,8 @@ async function main() {
         }
         const agent = findAgent(agentName);
         if (!agent) break;
-        const goal = goalManager.createGoal(agent.id, desc, { workingDirectory: goalWorkDir });
+        const effectiveWorkDir = goalWorkDir || bridge.getWorkingDirectory();
+        const goal = goalManager.createGoal(agent.id, desc, { workingDirectory: effectiveWorkDir });
         console.log(`  Goal created for ${agent.name}: ${goal.description}`);
         if (goalWorkDir) console.log(`  Working directory: ${goalWorkDir}`);
         console.log(`  Goal ID: ${goal.id.substring(0, 8)}`);
@@ -348,25 +339,6 @@ async function main() {
           const dirStr = g.workingDirectory ? `  dir: ${g.workingDirectory}` : '';
           console.log(`  [${g.status}] ${agent?.name || '?'}: ${g.description.substring(0, 50)}${planStr}${dirStr}`);
         }
-        break;
-      }
-
-      case 'chdir': {
-        const agentName = parts[1];
-        const dirPath = parts[2];
-        if (!agentName || !dirPath) {
-          console.log('  Usage: chdir <agent> <path>');
-          break;
-        }
-        const agent = findAgent(agentName);
-        if (!agent) break;
-        const goal = goalManager.getActiveGoal(agent.id);
-        if (!goal) {
-          console.log(`  ${agent.name} has no active goal.`);
-          break;
-        }
-        goalManager.updateGoal(goal.id, { workingDirectory: dirPath });
-        console.log(`  ${agent.name}'s goal now targets: ${dirPath}`);
         break;
       }
 
@@ -449,7 +421,7 @@ async function main() {
           break;
         }
         console.log(`  Waking ${agent.name} for goal: ${goal.description.substring(0, 50)}`);
-        await plannerLoop.wake(goal.id);
+        await adversary.wake(goal.id);
         break;
       }
 
@@ -466,7 +438,7 @@ async function main() {
           console.log(`  ${agent.name} has no active goal.`);
           break;
         }
-        plannerLoop.pause(goal.id);
+        adversary.pause(goal.id);
         console.log(`  Paused ${agent.name}'s goal: ${goal.description.substring(0, 50)}`);
         break;
       }
@@ -481,29 +453,9 @@ async function main() {
         const agent = findAgent(agentName);
         if (!agent) break;
 
-        // Build context from goal/plan/activity
-        const goal = goalManager.getActiveGoal(agent.id);
-        let context = `You are ${agent.name}. The user wants to talk to you about your progress.`;
-        if (goal) {
-          context += `\n\nYour current goal: ${goal.description}`;
-          const plan = goalManager.getCurrentPlan(goal.id);
-          if (plan) {
-            context += `\nPlan (v${plan.version}):`;
-            for (const step of plan.steps) {
-              context += `\n  [${step.status}] Step ${step.order + 1}: ${step.description}`;
-              if (step.result) context += ` — ${step.result.substring(0, 100)}`;
-            }
-          }
-        }
         const summary = await observability.getAgentSummary(agent.id, 10);
-        if (summary !== 'No activity recorded.') {
-          context += `\n\nRecent activity:\n${summary}`;
-        }
-
-        const result = await bridge.startConversation(agent.id, message, context);
-        if (!result.success) {
-          console.log(`  Error: ${result.error}`);
-        }
+        const response = await adversary.talk(agent.id, message, summary);
+        console.log(`  [${agent.name}] ${response}`);
         break;
       }
 
@@ -611,7 +563,7 @@ async function main() {
           break;
         }
         console.log(`  Sending reply to ${agent.name}...`);
-        await plannerLoop.reply(goal.id, answer);
+        await adversary.reply(goal.id, answer);
         break;
       }
 
@@ -700,14 +652,12 @@ async function main() {
         console.log('    hire [name]                   Hire an agent');
         console.log('    fire <agent>                  Fire an agent');
         console.log('    agents                        List agents');
-        console.log('    assign <agent> <task>         Assign a task');
         console.log('    approve <agent> <tool>        Approve a tool permission');
         console.log('    deny <agent>                  Deny pending permissions');
-        console.log('    tasks                         List all tasks');
+        console.log('    status [agent]                Show agent(s) current progress');
         console.log();
         console.log('    goal <agent> [--dir <path>] <desc>  Create a goal (optionally in a different codebase)');
         console.log('    goals [agent]                 List goals');
-        console.log('    chdir <agent> <path>          Set working directory for active goal');
         console.log('    constrain <agent> <text>      Add constraint to active goal');
         console.log('    plan <agent>                  Show current plan');
         console.log('    wake <agent>                  Trigger goal execution');
@@ -734,7 +684,7 @@ async function main() {
         console.log('  Shutting down...');
         triggerScheduler.stop();
         observability.stop();
-        plannerLoop.destroy();
+        adversary.destroy();
         bridge.destroy();
         runtime.destroy();
         rl.close();

@@ -1,17 +1,17 @@
 import { AgentTrigger } from '../types';
 import { GoalManager } from './GoalManager';
-import { PlannerLoop } from './PlannerLoop';
+import { AdversaryAgent } from './AdversaryAgent';
 import { eventBus } from './EventBus';
 
 export class TriggerScheduler {
   private goalManager!: GoalManager;
-  private plannerLoop!: PlannerLoop;
+  private adversary!: AdversaryAgent;
   private timers: Map<string, ReturnType<typeof setInterval>> = new Map();
   private started = false;
 
-  start(goalManager: GoalManager, plannerLoop: PlannerLoop): void {
+  start(goalManager: GoalManager, adversary: AdversaryAgent): void {
     this.goalManager = goalManager;
-    this.plannerLoop = plannerLoop;
+    this.adversary = adversary;
     this.started = true;
 
     // Set up timers for all existing enabled triggers
@@ -69,7 +69,7 @@ export class TriggerScheduler {
     }
 
     // Skip if already executing
-    if (this.plannerLoop.isGoalActive(trigger.goalId)) {
+    if (this.adversary.isGoalActive(trigger.goalId)) {
       return;
     }
 
@@ -85,7 +85,7 @@ export class TriggerScheduler {
       type: trigger.type,
     });
 
-    await this.plannerLoop.wake(trigger.goalId);
+    await this.adversary.wake(trigger.goalId);
   }
 
   async fireManual(triggerId: string): Promise<void> {

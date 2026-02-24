@@ -223,29 +223,46 @@ export class NodeAdapter implements RuntimeAdapter {
     maxTurns?: number;
     agentId?: string;
     additionalDirs?: string[];
+    noTools?: boolean;
   }): Promise<{ success: boolean; sessionId: string }> {
-    const { sessionId, prompt, workingDirectory, systemPrompt, allowedTools, maxTurns, agentId, additionalDirs } = options;
+    const { sessionId, prompt, workingDirectory, systemPrompt, allowedTools, maxTurns, agentId, additionalDirs, noTools } = options;
 
-    const args = [
-      '--print', '--verbose',
-      '--output-format', 'stream-json',
-      '--include-partial-messages',
-      '--session-id', sessionId,
-      '--setting-sources', 'user',
-    ];
+    let args: string[];
 
-    if (systemPrompt) {
-      args.push('--append-system-prompt', systemPrompt);
+    if (noTools) {
+      // No-tools mode: LLM-only session (no tool access)
+      args = [
+        '--print', '--verbose',
+        '--output-format', 'stream-json',
+        '--tools', '',
+        '--session-id', sessionId,
+      ];
+      if (systemPrompt) {
+        args.push('--append-system-prompt', systemPrompt);
+      }
+    } else {
+      // Worker mode: full tool access
+      args = [
+        '--print', '--verbose',
+        '--output-format', 'stream-json',
+        '--include-partial-messages',
+        '--session-id', sessionId,
+        '--setting-sources', 'user',
+      ];
+      if (systemPrompt) {
+        args.push('--append-system-prompt', systemPrompt);
+      }
+      if (allowedTools && allowedTools.length > 0) {
+        args.push('--allowedTools', allowedTools.join(','));
+      }
+      if (maxTurns && maxTurns > 0) {
+        args.push('--max-turns', String(maxTurns));
+      }
+      if (additionalDirs && additionalDirs.length > 0) {
+        args.push('--add-dir', ...additionalDirs);
+      }
     }
-    if (allowedTools && allowedTools.length > 0) {
-      args.push('--allowedTools', allowedTools.join(','));
-    }
-    if (maxTurns && maxTurns > 0) {
-      args.push('--max-turns', String(maxTurns));
-    }
-    if (additionalDirs && additionalDirs.length > 0) {
-      args.push('--add-dir', ...additionalDirs);
-    }
+
     args.push('--', prompt);
 
     this.spawnSessionProcess(sessionId, args, workingDirectory, agentId);

@@ -1,4 +1,4 @@
-import { Agent, Task, AgentGoal, AgentPlan, PlanStep } from '../types';
+import { Agent, Task } from '../types';
 import { RuntimeAdapter } from './RuntimeAdapter';
 import { AgentManager } from './AgentManager';
 import { TaskManager } from './TaskManager';
@@ -161,7 +161,7 @@ export class ClaudeCodeBridge {
     return parts.join('\n');
   }
 
-  async executeTask(agentId: string, taskId: string, maxTurns?: number, workingDirectory?: string): Promise<{
+  async executeTask(agentId: string, taskId: string, maxTurns?: number, workingDirectory?: string, promptOverride?: string): Promise<{
     success: boolean;
     response: string;
     error?: string;
@@ -169,36 +169,26 @@ export class ClaudeCodeBridge {
     const agent = this.agentManager.getAgent(agentId);
     const task = this.taskManager.getTask(taskId);
 
-    console.log('[executeTask] agent:', agent?.name, 'task:', task?.id, 'activeExecutions:', this.activeExecutions.get(agentId));
-
     if (!agent || !task) {
-      console.error('[executeTask] Agent or task not found');
       return { success: false, response: '', error: 'Agent or task not found' };
     }
 
     if (this.activeExecutions.get(agentId)) {
-      console.error('[executeTask] Agent is busy — activeExecutions stuck');
       return { success: false, response: '', error: 'Agent is busy' };
     }
 
     this.activeExecutions.set(agentId, true);
 
     try {
-      console.log('[executeTask] step 1: updating state');
       this.agentManager.updateAgentState(agentId, 'thinking');
       this.taskManager.startTask(taskId);
       this.taskManager.addLog(taskId, `${agent.name} started working`);
 
       const effectiveDir = workingDirectory || this.workingDirectory;
-      console.log('[executeTask] step 2: ensuring skills, workingDir:', effectiveDir);
-      // Ensure skills before starting
       await this.ensureSkills();
 
-      console.log('[executeTask] step 3: building prompt');
-      const prompt = this.buildPrompt(agent, task);
+      const prompt = promptOverride || this.buildPrompt(agent, task);
 
-      console.log('[executeTask] step 4: starting session');
-      // Start an interactive session instead of one-shot execution
       const systemPrompt = agent.systemPrompt
         ? `${agent.systemPrompt}\n\n${FIND_SKILLS_SUMMARY}`
         : FIND_SKILLS_SUMMARY;
@@ -213,11 +203,8 @@ export class ClaudeCodeBridge {
         this.workspaceRoots
       );
 
-      console.log('[executeTask] step 5: session started');
-      // Session completion is handled asynchronously via session_ended event
       return { success: true, response: 'Session started' };
     } catch (error) {
-      console.error('[executeTask] caught error:', error);
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.taskManager.failTask(taskId, errorMsg);
       this.agentManager.unassignTask(agentId);
@@ -289,156 +276,4 @@ export class ClaudeCodeBridge {
     return this.activeExecutions.get(agentId) || false;
   }
 
-  // --- Goal-aware prompt builders ---
-
-  buildGoalPrompt(agent: Agent, goal: AgentGoal, plan: AgentPlan, step: PlanStep, preferenceContext?: string): string {
-    const parts: string[] = [];
-
-    parts.push(`You are ${agent.name}, an autonomous agent managed by the workfarm system.`);
-    parts.push(`IMPORTANT: You are operating under a STRICT GOAL assigned by your manager. Do not infer, rename, or reinterpret the goal. Follow it exactly as stated.`);
-    if (goal.systemPrompt) {
-      parts.push(`\n${goal.systemPrompt}`);
-    }
-
-    parts.push(`\n=== YOUR ASSIGNED GOAL (do not modify) ===`);
-    parts.push(`"${goal.description}"`);
-    parts.push(`Working directory: ${goal.workingDirectory || this.workingDirectory}`);
-    if (this.workspaceRoots.length > 0) {
-      parts.push(`Workspace roots (you have access to these):\n${this.workspaceRoots.map(r => `  - ${r}`).join('\n')}`);
-    }
-    parts.push(`===========================================`);
-
-    if (goal.constraints.length > 0) {
-      parts.push(`\nConstraints:\n${goal.constraints.map(c => `- ${c}`).join('\n')}`);
-    }
-
-    if (preferenceContext) {
-      parts.push(`\n${preferenceContext}`);
-    }
-
-    parts.push(`\nPlan (v${plan.version}):`);
-    for (const s of plan.steps) {
-      const marker = s.id === step.id ? '>>>' : '   ';
-      const statusIcon = s.status === 'completed' ? '[done]' : s.status === 'failed' ? '[fail]' : s.status === 'in_progress' ? '[...]' : '[   ]';
-      parts.push(`${marker} ${statusIcon} Step ${s.order + 1}: ${s.description}`);
-      if (s.result && s.id !== step.id) {
-        parts.push(`       Result: ${s.result.substring(0, 200)}`);
-      }
-    }
-
-    parts.push(`\nYour current task: Step ${step.order + 1}: ${step.description}`);
-    parts.push(`\nComplete this step. Be concise and effective. Stay within the scope of your assigned goal.`);
-    parts.push(`\nBefore asking the user a question, check if your known preferences already answer it. If so, decide autonomously and note "[Used preference: <key>]" in your response.`);
-    parts.push(`If you encounter genuine uncertainty, a judgment call, or conflicting approaches with no matching preference — do NOT guess. End your response with "[NEEDS_INPUT]: your question here" and stop working.`);
-
-    return parts.join('\n');
-  }
-
-  buildPlanningPrompt(
-    agent: Agent,
-    goal: AgentGoal,
-    previousResults?: { step: string; result: string }[],
-    preferenceContext?: string,
-    cycleNumber?: number
-  ): string {
-    const parts: string[] = [];
-
-    parts.push(`You are ${agent.name}, a planning assistant managed by the workfarm system.`);
-    parts.push(`IMPORTANT: You must plan EXACTLY for the goal below. Do not infer a different project name, rename the goal, or reinterpret what you're working on. The goal is authoritative.`);
-
-    parts.push(`\n=== YOUR ASSIGNED GOAL (do not modify) ===`);
-    parts.push(`"${goal.description}"`);
-    parts.push(`Working directory: ${goal.workingDirectory || this.workingDirectory}`);
-    if (this.workspaceRoots.length > 0) {
-      parts.push(`Workspace roots (you have access to these):\n${this.workspaceRoots.map(r => `  - ${r}`).join('\n')}`);
-    }
-    parts.push(`===========================================`);
-
-    if (goal.constraints.length > 0) {
-      parts.push(`\nConstraints:\n${goal.constraints.map(c => `- ${c}`).join('\n')}`);
-    }
-
-    if (preferenceContext) {
-      parts.push(`\n${preferenceContext}`);
-    }
-
-    if (previousResults && previousResults.length > 0) {
-      parts.push(`\nPrevious results${cycleNumber ? ` (cycle ${cycleNumber})` : ''}:`);
-      for (const pr of previousResults) {
-        parts.push(`- ${pr.step}: ${pr.result.substring(0, 200)}`);
-      }
-    }
-
-    parts.push(`\nCreate a plan to achieve this goal. Output ONLY a JSON object with this format:`);
-    parts.push(`{`);
-    parts.push(`  "reasoning": "why this plan",`);
-    parts.push(`  "recurring": true/false,`);
-    parts.push(`  "interval_minutes": number or null,`);
-    parts.push(`  "cycle_goal": "what this cycle should accomplish" or null,`);
-    parts.push(`  "completion_criteria": "when to stop cycling entirely" or null,`);
-    parts.push(`  "steps": [{"description": "step description"}, ...]`);
-    parts.push(`}`);
-    parts.push(`\nSet "recurring": true if this goal needs ongoing cycles (monitoring, maintenance, continuous improvement).`);
-    parts.push(`Set "recurring": false if this is a one-time task with a clear end state.`);
-    parts.push(`If recurring, suggest an interval_minutes for how often to re-check, and completion_criteria for when to stop.`);
-    parts.push(`\nKeep steps concrete and actionable. Output valid JSON only, no markdown fences.`);
-
-    return parts.join('\n');
-  }
-
-  async startConversation(
-    agentId: string,
-    message: string,
-    context: string
-  ): Promise<{ success: boolean; error?: string }> {
-    const agent = this.agentManager.getAgent(agentId);
-    if (!agent) return { success: false, error: 'Agent not found' };
-
-    // If agent has an active session, send to it
-    const activeSession = this.sessionManager.getActiveSessionForAgent(agentId);
-    if (activeSession) {
-      try {
-        await this.sessionManager.sendMessage(activeSession.id, message, this.workingDirectory);
-        return { success: true };
-      } catch (error) {
-        return { success: false, error: String(error) };
-      }
-    }
-
-    // Start a new conversation session (no task)
-    const conversationTaskId = 'conversation';
-    const systemPrompt = agent.systemPrompt
-      ? `${agent.systemPrompt}\n\n${context}`
-      : context;
-
-    eventBus.emit('conversation_started', { agentId, message });
-
-    try {
-      await this.sessionManager.startSession(
-        agentId,
-        conversationTaskId,
-        message,
-        this.workingDirectory,
-        systemPrompt,
-        agent.approvedTools,
-        undefined,
-        this.workspaceRoots
-      );
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
-
-  async continueConversation(agentId: string, message: string): Promise<{ success: boolean; error?: string }> {
-    const session = this.sessionManager.getActiveSessionForAgent(agentId);
-    if (!session) return { success: false, error: 'No active session for this agent' };
-
-    try {
-      await this.sessionManager.sendMessage(session.id, message, this.workingDirectory);
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  }
 }
